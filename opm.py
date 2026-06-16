@@ -400,10 +400,14 @@ def missing_on_dest(mnt, dest, cfg, paths, stop=None, procs=None):
 
 
 def delete_source(card, mnt, cfg, dest, paths, owned=True, stop=None, procs=None):
-    """Remove verified files from the card via rsync --remove-source-files, which
-    re-checksums each file before deleting it. If we own a read-only mount, switch it
-    to read-write first (with an e2fsck pass). If the desktop already has it mounted
-    read-write (mnt under /media), delete straight from there."""
+    """Remove copied files from the card via rsync --remove-source-files. If we own a
+    read-only mount, switch it to read-write first (with an e2fsck pass). If the
+    desktop already has it mounted read-write (mnt under /media), delete from there.
+
+    Speed: when verify() already checksum-confirmed the copy (the default), this does
+    a fast size+mtime match before unlinking — no second full re-read of every byte.
+    Only when verify is disabled does it fall back to a checksum (-c) compare here, so
+    there is always exactly one checksum gate before any file is removed."""
     if owned:
         cleanup_mount(card, mnt)                    # drop our read-only mount
         os.makedirs(mnt, exist_ok=True)
@@ -422,9 +426,10 @@ def delete_source(card, mnt, cfg, dest, paths, owned=True, stop=None, procs=None
                          f"destination (e.g. {miss[0]}); source kept"}
     flatten = cfg["copy"].get("flatten", True)
     af = archive_flags(dest)
+    csum = [] if cfg["after_copy"].get("verify", True) else ["-c"]
     for p in paths:
         src, rflags = _rsync_src(mnt, p, flatten)
-        cmd = (["rsync"] + af + ["-c", "--remove-source-files"] + rflags
+        cmd = (["rsync"] + af + csum + ["--remove-source-files"] + rflags
                + _excludes(cfg) + [src, str(dest) + "/"])
         run(cmd, stop=stop, procs=procs)
         if cfg["after_copy"].get("prune_empty_dirs", True):
