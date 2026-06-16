@@ -1,0 +1,381 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>opm - Orange Pi SD copier</title>
+<style>
+  :root{
+    --bg:#0f1419; --panel:#171d26; --panel2:#1d2530; --line:#2a3340;
+    --fg:#e6edf3; --mut:#8b98a8; --acc:#ff7a18; --ok:#3fb950; --warn:#d29922; --bad:#f85149; --blu:#388bfd;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,Segoe UI,Roboto,sans-serif}
+  header{display:flex;align-items:center;gap:12px;padding:14px 20px;background:var(--panel);border-bottom:1px solid var(--line)}
+  header h1{font-size:17px;margin:0;font-weight:600}
+  header .dot{color:var(--acc)}
+  .role{margin-left:auto;font-size:12px;padding:4px 10px;border-radius:999px;border:1px solid var(--line);color:var(--mut)}
+  .role.root{color:var(--ok);border-color:var(--ok)} .role.noroot{color:var(--warn);border-color:var(--warn)}
+  main{max-width:1000px;margin:0 auto;padding:20px;display:grid;gap:16px}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px}
+  .panel h2{margin:0 0 12px;font-size:14px;font-weight:600;color:var(--mut);text-transform:uppercase;letter-spacing:.04em}
+  .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+  button{background:var(--panel2);color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:8px 14px;font-size:13px;cursor:pointer}
+  button:hover:not(:disabled){border-color:var(--acc)}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  button.primary{background:var(--acc);border-color:var(--acc);color:#1a1205;font-weight:600}
+  button.danger{border-color:var(--bad);color:var(--bad)}
+  button.danger:hover:not(:disabled){background:var(--bad);color:#fff}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--line)}
+  th{color:var(--mut);font-weight:500}
+  td.mono,.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+  .badge{font-size:11px;padding:2px 8px;border-radius:999px;border:1px solid var(--line)}
+  .badge.ok{color:var(--ok);border-color:var(--ok)} .badge.no{color:var(--mut)}
+  label.fld{display:block;margin:10px 0}
+  label.fld span{display:block;color:var(--mut);font-size:12px;margin-bottom:4px}
+  input[type=text],textarea{width:100%;background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-family:ui-monospace,monospace;font-size:13px}
+  textarea{min-height:70px;resize:vertical}
+  .hint{color:var(--mut);font-size:12px}
+  .check{display:flex;gap:8px;align-items:center}
+  .cardgrid{display:flex;gap:10px;overflow-x:auto;overflow-y:hidden;padding-bottom:8px;scroll-snap-type:x proximity}
+  .cardgrid > .ccard{flex:0 0 300px;scroll-snap-align:start}
+  .cardgrid::-webkit-scrollbar{height:10px}
+  .cardgrid::-webkit-scrollbar-thumb{background:var(--line);border-radius:999px}
+  .cardgrid::-webkit-scrollbar-track{background:var(--bg);border-radius:999px}
+  .ccard{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:10px 12px}
+  .ccard .top{display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;gap:8px}
+  .ccard .cid{font-weight:600}
+  .stage{font-size:12px;padding:2px 8px;border-radius:999px;border:1px solid var(--line);color:var(--mut)}
+  .stage.copying,.stage.mounting,.stage.verifying,.stage.deleting,.stage.premounted{color:var(--blu);border-color:var(--blu)}
+  .stage.done{color:var(--ok);border-color:var(--ok)}
+  .stat-ok{color:var(--ok)} .stat-bad{color:var(--bad)} .stat-warn{color:var(--warn)}
+  .bar{height:10px;background:var(--bg);border:1px solid var(--line);border-radius:999px;overflow:hidden;margin:8px 0 6px}
+  .bar > i{display:block;height:100%;background:var(--acc);width:0;transition:width .5s}
+  .bar.done > i{background:var(--ok)}
+  .sbar{display:inline-block;width:72px;height:8px;background:var(--bg);border:1px solid var(--line);border-radius:999px;overflow:hidden;vertical-align:middle;margin-right:6px}
+  .sbar > i{display:block;height:100%;background:var(--acc);width:0;transition:width .5s}
+  .sbar.done > i{background:var(--ok)}
+  .donebar{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-top:8px;padding-top:7px;border-top:1px solid var(--line);font-size:12px}
+  .donebar button{padding:5px 10px;font-size:12px}
+  .speed{display:inline-block;font-family:ui-monospace,monospace;font-size:12px;padding:3px 9px;border:1px solid var(--line);border-radius:6px;margin-right:8px;color:var(--blu)}
+  .fit{padding:8px 12px;border-radius:8px;font-size:13px;margin:8px 0}
+  .fit.ok{background:rgba(63,185,80,.10);border:1px solid var(--ok);color:#9ff0ad}
+  .fit.bad{background:rgba(248,81,73,.12);border:1px solid var(--bad);color:#ffb3ae}
+  .fit.warn{background:rgba(210,153,34,.12);border:1px solid var(--warn);color:#f0d28a}
+  details{margin:6px 0} summary{cursor:pointer;color:var(--mut);font-size:12px;padding:2px 0}
+  .subsys{border-left:2px solid var(--line);margin:4px 0 6px 4px;padding-left:8px;overflow-x:auto}
+  .sesstbl{width:100%;border-collapse:collapse;font-size:12px;margin:2px 0}
+  .sesstbl th,.sesstbl td{padding:3px 6px;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap}
+  .sesstbl th{color:var(--mut);font-weight:500;font-size:11px}
+  .sesstbl tr:last-child td{border-bottom:0}
+  .sesstbl td:first-child,.sesstbl th:first-child{width:16px;text-align:center;padding:3px 2px}
+  .srow{display:flex;align-items:center;gap:6px;font-size:11px;line-height:1.6;padding:2px 0;border-bottom:1px solid var(--line)}
+  .srow:last-child{border-bottom:0}
+  .srow .when{flex:0 0 auto;color:var(--mut)}
+  .srow .ssize{flex:0 0 auto;min-width:46px;text-align:right;color:var(--mut)}
+  .srow .sbar{flex:1 1 auto;width:auto;min-width:30px;margin:0}
+  .srow .spct{flex:0 0 30px;text-align:right;color:var(--mut)}
+  .prow{padding:4px 0;border-bottom:1px solid var(--line);font-size:11px}
+  .prow:last-child{border-bottom:0}
+  .prow .ptop{display:flex;gap:8px;align-items:baseline}
+  .prow .ptop .w{flex:1 1 auto;min-width:0;color:var(--fg);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .prow .ptop .z{flex:0 0 auto;color:var(--mut)}
+  .prow .recs{color:var(--mut);word-break:break-word}
+  pre#log{background:#0a0e13;border:1px solid var(--line);border-radius:8px;padding:10px;max-height:260px;overflow:auto;font-size:12px;white-space:pre-wrap;margin:0}
+  .msg{padding:8px 12px;border-radius:8px;font-size:13px;margin-bottom:10px}
+  .msg.err{background:rgba(248,81,73,.12);border:1px solid var(--bad);color:#ffb3ae}
+  .warnbar{background:rgba(210,153,34,.12);border:1px solid var(--warn);color:#f0d28a;padding:10px 14px;border-radius:8px;font-size:13px}
+</style>
+</head>
+<body>
+<header>
+  <h1><span class="dot">●</span> opm &mdash; Orange Pi SD copier</h1>
+  <span id="role" class="role">…</span>
+</header>
+
+<main>
+  <div id="rootwarn"></div>
+
+  <!-- DETECT -->
+  <section class="panel">
+    <h2>1 &middot; Detected cards</h2>
+    <div class="row" style="margin-bottom:10px">
+      <button onclick="detect()">↻ Refresh</button>
+      <span id="detsum" class="hint"></span>
+    </div>
+    <table>
+      <thead><tr><th>Use</th><th>Slot</th><th>Device</th><th>FS</th><th>Size</th><th>Label</th><th>Status</th></tr></thead>
+      <tbody id="cards"><tr><td colspan="7" class="hint">Loading…</td></tr></tbody>
+    </table>
+  </section>
+
+  <!-- CONFIG -->
+  <section class="panel">
+    <h2>2 &middot; What to copy</h2>
+    <label class="fld">
+      <span>Paths to copy from each card (one per line, relative to the card root)</span>
+      <textarea id="paths" placeholder="/home/orangepi/camera-recorder/recordings/stereo"></textarea>
+    </label>
+    <label class="fld">
+      <span>Destination on this PC (or an external drive mount)</span>
+      <input id="dest" type="text">
+    </label>
+    <div class="row">
+      <label class="check"><input id="del" type="checkbox"> <span>Delete source files from card after a verified copy</span></label>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <button onclick="applyConfig()">Apply &amp; check space</button>
+      <span id="cfgnote" class="hint"></span>
+    </div>
+    <p class="hint" style="margin:10px 0 0">Safety label: <code id="reqlabel" class="mono"></code> · only matching cards are touched. Changes apply to the running server; edit <code>config.yaml</code> to persist.</p>
+  </section>
+
+  <!-- PLAN -->
+  <section class="panel">
+    <h2>3 &middot; Plan &amp; disk space</h2>
+    <div class="row" style="margin-bottom:6px"><button onclick="precheck()">↻ Recheck</button>
+      <span class="hint">size to copy, free space on the Orange Pi card and on the destination, and per-session date/time.</span></div>
+    <div id="plan" class="hint">…</div>
+  </section>
+
+  <!-- RUN -->
+  <section class="panel">
+    <h2>4 &middot; Run</h2>
+    <div id="runmsg"></div>
+    <div class="row">
+      <button id="b_dry" onclick="run({dry_run:true})">🔍 Dry-run (preview only)</button>
+      <button id="b_copy" class="primary" onclick="run({no_delete:true})">⬇ Copy (keep source)</button>
+      <button id="b_del" class="danger" onclick="runDelete()">⬇✕ Copy + delete source</button>
+    </div>
+    <p class="hint" style="margin:10px 0 0">Copy buttons stay disabled until the plan confirms the data fits the destination. “Copy + delete” only removes files that pass a checksum re-verify.</p>
+  </section>
+
+  <!-- PROGRESS -->
+  <section class="panel">
+    <h2>5 &middot; Progress</h2>
+    <div id="jobhdr" style="margin-bottom:10px"><span class="hint">No job yet.</span></div>
+    <div id="prog" class="cardgrid"></div>
+    <h2 style="margin-top:16px">Log</h2>
+    <pre id="log">—</pre>
+  </section>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+let polling = null, planFits = false, planPlaceholder = true;
+
+async function jget(u){ const r = await fetch(u); return r.json(); }
+async function jpost(u,b){ const r = await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b||{})}); return r.json(); }
+
+function fmtBytes(n){ if(n===undefined||n===null) return '?'; const u=['B','KB','MB','GB','TB']; let f=Math.max(0,n),i=0; while(f>=1024&&i<u.length-1){f/=1024;i++;} return f.toFixed(i?1:0)+u[i]; }
+
+function setRole(isRoot){
+  const el=$('role');
+  el.textContent = isRoot ? 'root · copy enabled' : 'non-root · preview only';
+  el.className = 'role ' + (isRoot?'root':'noroot');
+  $('rootwarn').innerHTML = isRoot ? '' :
+    '<div class="warnbar">Server is running without root, so it can detect cards but cannot mount/copy them. Restart with <code>sudo python3 webui.py</code> to enable copying.</div>';
+}
+
+async function detect(){
+  $('detsum').textContent = 'scanning…';
+  const d = await jget('/api/detect');
+  if(d.is_root!==undefined) setRole(d.is_root);
+  const tb=$('cards'); tb.innerHTML='';
+  if(d.error){ tb.innerHTML=`<tr><td colspan="7" class="stat-bad">${d.error}</td></tr>`; return; }
+  if(!d.cards.length){ tb.innerHTML='<tr><td colspan="7" class="hint">No USB readers detected. Insert cards and Refresh.</td></tr>'; }
+  for(const c of d.cards){
+    const tr=document.createElement('tr');
+    const chk = c.eligible ? `<input type="checkbox" class="csel" data-slot="${c.slot}" checked onchange="precheck()">` : '';
+    const mnt = c.mounted_at ? ` <span class="hint">· mounted at ${c.mounted_at}</span>` : '';
+    const status = c.eligible ? `<span class="badge ok">eligible</span>${mnt}`
+      : `<span class="badge no">skip</span> <span class="hint">${c.error||''}</span>`;
+    tr.innerHTML = `<td>${chk}</td><td>${c.slot}</td><td class="mono">${c.disk||'-'}</td>
+      <td>${c.fstype||'-'}</td><td>${c.size_h||'-'}</td><td class="mono">${c.label||'-'}</td><td>${status}</td>`;
+    tb.appendChild(tr);
+  }
+  $('detsum').textContent = `${d.count} slot(s), ${d.eligible} eligible`;
+  precheck();
+}
+
+async function loadConfig(){
+  const c = await jget('/api/config');
+  setRole(c.is_root);
+  $('paths').value = (c.copy_paths||[]).join('\n');
+  $('dest').value = c.destination||'';
+  $('del').checked = !!c.delete_source;
+  $('reqlabel').textContent = c.require_label || '(any ext fs — unguarded)';
+}
+
+async function applyConfig(){
+  const paths = $('paths').value.split('\n').map(s=>s.trim()).filter(Boolean);
+  const c = await jpost('/api/config', {copy_paths:paths, destination:$('dest').value, delete_source:$('del').checked});
+  $('cfgnote').textContent = c.placeholder ? '⚠ paths still contain the REPLACE_ME placeholder' : 'applied ✓';
+  $('cfgnote').className = 'hint ' + (c.placeholder?'stat-warn':'stat-ok');
+  await precheck();
+}
+
+function selectedSlots(){ return [...document.querySelectorAll('.csel:checked')].map(e=>+e.dataset.slot); }
+
+async function precheck(){
+  const slots = selectedSlots();
+  const p = await jpost('/api/precheck', {slots});
+  renderPlan(p);
+}
+
+function sessionsHtml(sessions){
+  if(!sessions || !sessions.length) return '';
+  const rows = sessions.map(s=>{
+    const when = s.date ? `${s.date} ${s.time||''}`.trim() : (s.name||'?');
+    const recs = Object.entries(s.types||{}).map(([k,v])=>`${k}×${v}`).join(', ')||'-';
+    return `<div class="prow" title="${s.name||''}">
+      <div class="ptop"><span class="w mono">${when}</span>
+        <span class="z">${fmtBytes(s.bytes)}</span><span class="z">${s.files}f</span></div>
+      <div class="recs">${recs}</div></div>`;
+  }).join('');
+  return `<details class="sess"><summary>${sessions.length} recordings (date · time · records · size)</summary>
+    <div class="subsys">${rows}</div></details>`;
+}
+
+function renderPlan(p){
+  if(p.error){ $('plan').innerHTML=`<div class="fit bad">${p.error}</div>`; planFits=false; updateRunButtons(); return; }
+  planPlaceholder = p.placeholder;
+  planFits = p.fits && p.cards.length>0 && !p.placeholder;
+  let html='';
+  if(p.placeholder) html += `<div class="fit warn">Set real paths in “What to copy” above, then Apply.</div>`;
+  else if(!p.cards.length) html += `<div class="fit warn">No eligible cards selected.</div>`;
+  html += `<div><b>Destination</b> <span class="mono">${p.destination}</span></div>`;
+  if(p.cards.length){
+    const cls = !p.fits ? 'bad' : (p.tight ? 'warn' : 'ok');
+    const msg = !p.fits
+      ? `Won't fit — needs ${fmtBytes(p.need)}, only ${fmtBytes(p.dest_free)} free. Free space or change the destination.`
+      : `Fits — needs ${fmtBytes(p.need)} of ${fmtBytes(p.dest_free)} free → ${fmtBytes(p.after_free)} left after.${p.tight?' (low headroom)':''}`;
+    html += `<div class="fit ${cls}">${msg}</div>`;
+  }
+  let cards='';
+  for(const c of p.cards){
+    cards += `<div class="ccard">
+      <div class="top"><span class="cid">slot ${c.slot} · ${c.label||c.card_id}</span>
+        <span class="hint mono">${c.disk}</span></div>
+      <div>to copy: <b>${fmtBytes(c.bytes)}</b> · ${c.files} files · ${c.sessions.length} recordings</div>
+      <div class="hint">Orange Pi card free: ${fmtBytes(c.src_free)} of ${fmtBytes(c.src_total)}</div>
+      ${sessionsHtml(c.sessions)}
+    </div>`;
+  }
+  if(cards) html += `<div class="cardgrid" style="margin-top:8px">${cards}</div>`;
+  $('plan').innerHTML = html;
+  updateRunButtons();
+}
+
+function updateRunButtons(){
+  const running = !!polling;
+  $('b_dry').disabled = running || planPlaceholder;
+  const block = running || !planFits;
+  $('b_copy').disabled = block;
+  $('b_del').disabled = block;
+}
+
+function showRunMsg(m){ $('runmsg').innerHTML = m ? `<div class="msg err">${m}</div>` : ''; }
+
+async function run(opts){
+  await applyConfig();
+  const slots = selectedSlots();
+  if(!slots.length){ showRunMsg('Select at least one eligible card.'); return; }
+  if(!opts.dry_run && !planFits){ showRunMsg('Not enough space at the destination — see Plan & space.'); return; }
+  const r = await jpost('/api/run', Object.assign({slots}, opts));
+  if(r.error){ showRunMsg(r.error); return; }
+  ejected.clear(); showRunMsg(''); startPolling();
+}
+
+function runDelete(){
+  const slots = selectedSlots();
+  if(!slots.length){ showRunMsg('Select at least one eligible card.'); return; }
+  if(!confirm(`This will DELETE the copied files from ${slots.length} card(s) AFTER a verified copy. Continue?`)) return;
+  run({no_delete:false});
+}
+
+function startPolling(){ if(polling) clearInterval(polling); poll(); polling=setInterval(poll,1000); updateRunButtons(); }
+
+async function poll(){
+  const s = await jget('/api/status');
+  renderProgress(s);
+  if(!s.running && s.finished_at){ clearInterval(polling); polling=null; updateRunButtons(); detect(); }
+}
+
+let ejected = new Set();
+function doneBanner(c){
+  const ok = c.status==='ok';
+  const label = ok ? '✓ Done — safe to remove this card' : `finished: ${c.status}`;
+  const ctrl = ejected.has(c.slot)
+    ? '<span class="stat-ok">⏏ unmounted — safe to remove</span>'
+    : `<button id="eject${c.slot}" onclick="ejectSlot(${c.slot})">⏏ Safe remove (unmount)</button>`;
+  return `<div class="donebar"><span class="${ok?'stat-ok':'stat-bad'}">${label}</span>${ctrl}</div>`;
+}
+
+async function ejectSlot(slot){
+  const b=document.getElementById('eject'+slot);
+  if(b){ b.disabled=true; b.textContent='unmounting…'; }
+  const r=await jpost('/api/eject',{slot});
+  if(r.error){ if(b){ b.disabled=false; b.textContent='⏏ Safe remove (unmount)'; } showRunMsg(r.error); return; }
+  ejected.add(slot);
+  if(b) b.outerHTML='<span class="stat-ok">⏏ unmounted — safe to remove</span>';
+}
+
+function sessRows(c){
+  const ss = c.sessions||[];
+  if(!ss.length) return '';
+  const rows = ss.map(s=>{
+    const pct = s.bytes ? Math.min(100, Math.round((s.copied||0)*100/s.bytes)) : (s.done?100:0);
+    const icon = s.done ? '<span class="stat-ok">✓</span>'
+      : (s.copied>0 ? '<span class="stat-warn">▶</span>' : '<span class="hint">·</span>');
+    // compact: drop the year, keep MM-DD HH:MM:SS (seconds distinguish recordings)
+    const when = (s.date && s.time) ? `${s.date.slice(5)} ${s.time}` : (s.name || '?');
+    return `<div class="srow" title="${s.name||''}">${icon}<span class="when mono">${when}</span>
+      <span class="ssize">${fmtBytes(s.bytes)}</span>
+      <span class="sbar ${s.done?'done':''}"><i style="width:${pct}%"></i></span>
+      <span class="spct">${pct}%</span></div>`;
+  }).join('');
+  const open = (c.stage && c.stage!=='done' && c.stage!=='pending') ? 'open' : '';
+  return `<details class="sess" ${open}><summary>recordings ${c.progress?.sessions_done||0}/${c.dirs_total||0} (per-session)</summary>
+    <div class="subsys">${rows}</div></details>`;
+}
+
+function renderProgress(s){
+  const cards = Object.values(s.cards||{}).sort((a,b)=>a.slot-b.slot);
+  const io = s.io||{read_mbps:0,write_mbps:0};
+  const ov = s.overall||{};
+  const etaPill = (s.running && ov.eta) ? `<span class="speed">ETA ${ov.eta}</span>` : '';
+  $('jobhdr').innerHTML = s.started_at
+    ? `<span class="speed">read ${io.read_mbps.toFixed(0)} MB/s</span><span class="speed">write ${io.write_mbps.toFixed(0)} MB/s</span>${etaPill}
+       <span class="hint">${s.mode||''} · ${s.running?'running…':'finished '+(s.finished_at||'')}${s.do_delete?' · delete ON':''}</span>`
+    : '<span class="hint">No job yet.</span>';
+  const g=$('prog'); g.innerHTML='';
+  for(const c of cards){
+    const pr=c.progress||{percent:0};
+    const done = c.stage==='done';
+    const pct = pr.percent||0;
+    const cls = c.status==='ok' ? 'stat-ok' : (c.status==='pending'||!done) ? '' : 'stat-bad';
+    g.innerHTML += `<div class="ccard">
+      <div class="top"><span class="cid">slot ${c.slot} · ${c.card_id||''}</span>
+        <span class="stage ${c.stage}">${c.stage}</span></div>
+      <div class="hint mono">${c.disk||''}${c.label?(' · '+c.label):''}${c.size_h?(' · '+c.size_h):''}</div>
+      <div class="bar ${done&&c.status==='ok'?'done':''}"><i style="width:${pct}%"></i></div>
+      <div class="hint">${pct}% · ${fmtBytes(pr.bytes_done)}/${fmtBytes(c.bytes_total)} · recordings ${pr.sessions_done||0}/${c.dirs_total||0}${(c.stage==='copying'&&pr.rate_mbps)?(' · '+pr.rate_mbps.toFixed(1)+' MB/s'):''}${pr.eta?(' · ETA '+pr.eta):''}</div>
+      <div style="margin-top:4px">status: <b class="${cls}">${c.status}</b></div>
+      ${(c.stage==='deleting'||c.deleted)?`<div class="hint" style="margin-top:3px">source delete <span class="sbar ${c.deleted?'done':''}" style="width:90px"><i style="width:${c.deleted?100:(pr.del_percent||0)}%"></i></span> ${c.deleted?100:(pr.del_percent||0)}%${c.deleted?' · removed from card':''}</div>`:''}
+      ${sessRows(c)}
+      ${c.missing&&c.missing.length?`<div class="hint">not on card: ${c.missing.join(', ')}</div>`:''}
+      ${c.error?`<div class="stat-bad">${c.error}</div>`:''}
+      ${done?doneBanner(c):''}
+    </div>`;
+  }
+  $('log').textContent=(s.log||[]).join('\n')||'—';
+  $('log').scrollTop=$('log').scrollHeight;
+}
+
+// boot
+loadConfig().then(detect);
+</script>
+</body>
+</html>

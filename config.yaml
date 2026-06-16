@@ -1,0 +1,64 @@
+# ============================================================================
+# opm (Orange Pi Manager) configuration
+# Pipeline:  detect -> mount RO -> identify -> copy -> verify -> delete -> unmount
+# ============================================================================
+
+# Where copied data lands on THIS pc.
+# Layout:  <destination>/<card-id>/<timestamp>/<original/path/on/card>
+destination: /home/youssef/orangepi_manager/data
+
+# ----------------------------------------------------------------------------
+# THE "certain files" YOU WANT.   <-- EDIT THIS BEFORE RUNNING.
+# Paths are relative to each card's ROOT filesystem (a leading / is fine).
+# `opm run` refuses to start while the REPLACE_ME line is still present.
+# ----------------------------------------------------------------------------
+copy_paths:
+  - /home/orangepi/camera-recorder/recordings/stereo
+
+# Patterns never copied (and therefore never deleted), applied under every path.
+exclude:
+  - "lost+found"
+  - "*.tmp"
+  - "*.swp"
+
+# ----------------------------------------------------------------------------
+# How each card's destination folder is named.
+#   both    : read name from the card; fall back to physical slot if missing/duplicate
+#   content : name strictly from the card (hostname / machine-id / marker file)
+#   slot    : name strictly by physical hub slot (slot1..slot4)
+# ----------------------------------------------------------------------------
+identify:
+  mode: both
+  marker_file: /etc/opm-card-id      # optional: drop this file on each Pi for a custom name
+  content_sources:                   # tried in order; first non-empty wins
+    - /etc/hostname
+    - /etc/machine-id
+
+# ----------------------------------------------------------------------------
+# SAFETY: only treat a partition as an Orange Pi card if its ext filesystem
+# LABEL matches this (Python regex). This is what stops opm from ever copying
+# from / deleting on an unrelated USB drive (a backup disk, an external SSD...).
+# Your detected card's root is labelled 'opi_root'. Set to null to disable the
+# check (NOT recommended while delete_source is true).
+# ----------------------------------------------------------------------------
+safety:
+  require_label: "opi_root"          # regex; e.g. "opi_root|armbi_root"; null = any ext fs
+  min_size_gb: 1                     # ignore devices smaller than this (filters empty slots)
+
+# ----------------------------------------------------------------------------
+mount:
+  base: /mnt/opm                     # mountpoints: /mnt/opm/slot1 .. slot4
+  fsck_dirty: true                   # run `e2fsck -p` before the writable delete phase
+
+after_copy:
+  verify: true                       # checksum-verify every copied file before any deletion
+  delete_source: true                # YOUR CHOICE #4: remove verified files from the card
+  prune_empty_dirs: true             # remove dirs left empty by deletion (within copied trees only)
+
+copy:
+  parallel: true                     # process the 4 cards concurrently
+  max_workers: 4
+  flatten: true                      # true: copy only the leaf folder (dest/<leaf>/…, e.g. dest/stereo/…)
+                                     # false: recreate the full on-card path (dest/home/orangepi/…/stereo/…)
+
+require_confirm: true                # prompt y/N once before the delete phase

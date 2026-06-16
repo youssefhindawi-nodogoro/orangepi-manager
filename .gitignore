@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Copied recordings / job outputs (can be large; not source)
+data/
+logs/
+/mnt/
+
+# Editor / OS
+.vscode/
+.DS_Store
+*.swp
