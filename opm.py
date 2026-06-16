@@ -86,6 +86,13 @@ def load_config(path):
     cfg.setdefault("safety", {})
     cfg["safety"].setdefault("require_label", None)
     cfg["safety"].setdefault("min_size_gb", 0)
+    cfg.setdefault("preview", {})
+    cfg["preview"].setdefault("seconds", 20)      # first N seconds (fast); 0 = full recording.
+                                                  # These are 4000x1200 HEVC, slow to decode —
+                                                  # a cap reads only the start, so it's quick.
+    cfg["preview"].setdefault("width", 480)       # downscale width for fast/small preview
+    cfg["preview"].setdefault("fps", 15)          # lower fps = faster transcode + smaller
+    cfg["preview"].setdefault("crf", 34)          # higher = lower quality, faster, smaller
     return cfg
 
 
@@ -175,23 +182,38 @@ def _read_first(mnt, rels):
     return ""
 
 
-def identify(card, mnt, cfg, assigned, lock):
-    """Compute a unique, filesystem-safe folder name for this card."""
-    mode = cfg["identify"]["mode"]
-    raw = ""
-    if mode in ("both", "content"):
-        sources = []
-        if cfg["identify"].get("marker_file"):
-            sources.append(cfg["identify"]["marker_file"])
-        sources += cfg["identify"].get("content_sources", [])
-        raw = _read_first(mnt, sources)
-    raw = re.sub(r"[^A-Za-z0-9_.-]", "_", raw)[:64]
+def _sanitize(name):
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", name)[:64]
 
-    slot = card["slot"]
+
+def card_id_for(mnt, cfg, slot):
+    """Stable, unique-per-card folder name (no cross-card de-duplication). Prefers a
+    user marker file, then hostname+machine-id (machine-id is unique per OS install
+    even for dd-cloned cards, so it keeps each physical card in its own folder and is
+    the SAME across re-copies), then hostname, then the physical slot."""
+    mode = cfg["identify"].get("mode", "both")
+    if mode == "slot":
+        return f"slot{slot}"
+    marker = (_read_first(mnt, [cfg["identify"]["marker_file"]])
+              if cfg["identify"].get("marker_file") else "")
+    if marker:
+        return _sanitize(marker)
+    host = _read_first(mnt, ["/etc/hostname"])
+    mid = _read_first(mnt, ["/etc/machine-id"])
+    if mid:
+        return _sanitize(f"{host or 'opi'}-{mid[:8]}")
+    if host:
+        return _sanitize(host)
+    return f"slot{slot}"
+
+
+def identify(card, mnt, cfg, assigned, lock):
+    """card_id_for + a within-run uniqueness guard (only triggers if two cards resolve
+    to the same id, e.g. true clones that share a machine-id)."""
+    cid = card_id_for(mnt, cfg, card["slot"])
     with lock:
-        cid = f"slot{slot}" if (mode == "slot" or not raw) else raw
-        if cid in assigned:                # cloned images / collisions -> slot fallback
-            cid = f"{cid}_slot{slot}"
+        if cid in assigned:
+            cid = f"{cid}-{card['slot']}"
         assigned.add(cid)
     return cid
 
@@ -260,18 +282,45 @@ def _excludes(cfg):
     return out
 
 
+# Filesystems that can't store Unix ownership/permissions. Preserving them (-a)
+# there makes rsync fail with rc=23 on chown ("Operation not permitted"), so we
+# copy contents + mtimes only for these destinations.
+_NONUNIX_FS = {"vfat", "fat", "fat12", "fat16", "fat32", "msdos", "exfat",
+               "exfat-fuse", "ntfs", "ntfs3", "ntfs-3g", "fuseblk", "hfs",
+               "hfsplus", "udf", "iso9660"}
+
+
+def _flags_for_fs(fstype):
+    """rsync mode flags appropriate for a destination filesystem type."""
+    if (fstype or "").strip().lower() in _NONUNIX_FS:
+        return ["-rt", "--no-links", "--modify-window=2"]   # contents + times only
+    return ["-aHAX", "--numeric-ids"]                       # full preservation (ext4, …)
+
+
+def _fs_type(path):
+    p = os.path.abspath(str(path))
+    while not os.path.exists(p) and p != "/":
+        p = os.path.dirname(p)
+    return run(["findmnt", "-nro", "FSTYPE", "--target", p], check=False).stdout.strip()
+
+
+def archive_flags(dest):
+    """rsync preservation flags appropriate for the destination filesystem."""
+    return _flags_for_fs(_fs_type(dest))
+
+
 def do_copy(mnt, dest, cfg, dry):
     if not dry:
         dest.mkdir(parents=True, exist_ok=True)
     flatten = cfg["copy"].get("flatten", True)
+    af = archive_flags(dest)
     copied, missing = [], []
     for p in cfg["copy_paths"]:
         if not (Path(mnt) / p.lstrip("/")).exists():
             missing.append(p)
             continue
         src, rflags = _rsync_src(mnt, p, flatten)
-        cmd = (["rsync", "-aHAX", "--numeric-ids"] + rflags
-               + ["--info=stats1"] + _excludes(cfg))
+        cmd = ["rsync"] + af + rflags + ["--info=stats1"] + _excludes(cfg)
         if dry:
             cmd.append("--dry-run")
         cmd += [src, str(dest) + "/"]
@@ -283,10 +332,11 @@ def do_copy(mnt, dest, cfg, dry):
 def verify(mnt, dest, cfg, paths):
     """Checksum dry-run; returns list of files that DON'T match (empty == verified)."""
     flatten = cfg["copy"].get("flatten", True)
+    af = archive_flags(dest)
     failed = []
     for p in paths:
         src, rflags = _rsync_src(mnt, p, flatten)
-        cmd = (["rsync", "-aHAXc", "-n"] + rflags + ["--out-format=%i %n"]
+        cmd = (["rsync"] + af + ["-c", "-n"] + rflags + ["--out-format=%i %n"]
                + _excludes(cfg) + [src, str(dest) + "/"])
         for line in run(cmd).stdout.splitlines():
             code = line.split(" ", 1)[0]
@@ -301,10 +351,11 @@ def missing_on_dest(mnt, dest, cfg, paths):
     (respects excludes; size+mtime, no checksums) so it's a fast final guard run
     right before deletion."""
     flatten = cfg["copy"].get("flatten", True)
+    af = archive_flags(dest)
     miss = []
     for p in paths:
         src, rflags = _rsync_src(mnt, p, flatten)
-        cmd = (["rsync", "-aHAX", "-n", "--out-format=%i %n"] + rflags
+        cmd = (["rsync"] + af + ["-n", "--out-format=%i %n"] + rflags
                + _excludes(cfg) + [src, str(dest) + "/"])
         for line in run(cmd).stdout.splitlines():
             parts = line.split(" ", 1)
@@ -335,9 +386,10 @@ def delete_source(card, mnt, cfg, dest, paths, owned=True):
                 "error": f"delete aborted - {len(miss)} file(s) not confirmed on "
                          f"destination (e.g. {miss[0]}); source kept"}
     flatten = cfg["copy"].get("flatten", True)
+    af = archive_flags(dest)
     for p in paths:
         src, rflags = _rsync_src(mnt, p, flatten)
-        cmd = (["rsync", "-aHAXc", "--remove-source-files"] + rflags
+        cmd = (["rsync"] + af + ["-c", "--remove-source-files"] + rflags
                + _excludes(cfg) + [src, str(dest) + "/"])
         run(cmd)
         if cfg["after_copy"].get("prune_empty_dirs", True):
@@ -409,6 +461,22 @@ def list_sessions(path):
     return out
 
 
+def oversized_files(root, limit):
+    """Files at/over `limit` bytes under `root` (e.g. for FAT32's 4 GiB cap).
+    Returns [(relative_path, size), …]. Stat-only, no reads."""
+    out = []
+    for d, _dirs, files in os.walk(root):
+        for f in files:
+            p = os.path.join(d, f)
+            try:
+                sz = os.lstat(p).st_size
+            except OSError:
+                continue
+            if sz >= limit:
+                out.append((os.path.relpath(p, root), sz))
+    return out
+
+
 def disk_free(path):
     """(free_bytes, total_bytes) of the filesystem holding `path`, walking up to
     an existing parent if `path` does not exist yet."""
@@ -440,17 +508,22 @@ def process_card(card, cfg, ts, dry, do_delete, assigned, lock, on_stage=None):
         return res
 
     own_mnt = os.path.join(cfg["mount"]["base"], f"slot{slot}")
-    pre = existing_mount(card["rootpart"])           # desktop may have auto-mounted it
-    owned = pre is None                              # True => we mount it ourselves (read-only)
-    use_mnt = own_mnt if owned else pre
+    pre = existing_mount(card["rootpart"])           # desktop or our browse-mount may have it
+    base = cfg["mount"]["base"].rstrip("/")
+    ours = bool(pre) and (pre == own_mnt or pre.startswith(base + "/"))
+    owned = pre is None or ours                      # a mount we control => can remount rw to delete
+    use_mnt = pre or own_mnt
     try:
-        if owned:
+        if pre is None:
             stage("mounting")
             mount_ro(card, own_mnt)                  # read-only: safe even in dry-run
+        elif ours:
+            stage("mounting")                        # reuse our own read-only browse mount
         else:
-            stage("premounted")                      # reuse the existing /media mount
+            stage("premounted")                      # reuse the desktop /media (read-write) mount
         res["card_id"] = identify(card, use_mnt, cfg, assigned, lock)
-        dest = Path(cfg["destination"]) / res["card_id"] / ts
+        # stable per-card folder (no timestamp) -> re-copies merge in and dedup
+        dest = Path(cfg["destination"]) / res["card_id"]
         res["dest"] = str(dest)
         stage("copying", {"dest": str(dest), "src": use_mnt})
         res["copied"], res["missing"] = do_copy(use_mnt, dest, cfg, dry)
@@ -477,7 +550,7 @@ def process_card(card, cfg, ts, dry, do_delete, assigned, lock, on_stage=None):
         res.update(status="error", error=str(e))
     finally:
         if owned:
-            cleanup_mount(card, own_mnt)             # only unmount what we mounted
+            cleanup_mount(card, use_mnt)             # unmount what we mounted / control
         stage("done")
     return res
 

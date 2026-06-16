@@ -22,17 +22,18 @@ exclude:
   - "*.swp"
 
 # ----------------------------------------------------------------------------
-# How each card's destination folder is named.
-#   both    : read name from the card; fall back to physical slot if missing/duplicate
-#   content : name strictly from the card (hostname / machine-id / marker file)
-#   slot    : name strictly by physical hub slot (slot1..slot4)
+# How each card's destination folder is named (it gets <destination>/<id>/, no
+# timestamp — so re-copying a card reuses its folder and only NEW recordings are
+# added; nothing is duplicated or overwritten).
+#   both/content : <hostname>-<machine-id8>, e.g. orangepi5-0de8ed15. Stable per
+#                  card and unique even for dd-cloned cards (machine-id is unique
+#                  per install). Falls back to hostname, then slot, if unavailable.
+#   slot         : name strictly by physical hub slot (slot1, slot2, …).
+# A marker_file on the card, if present and non-empty, overrides everything.
 # ----------------------------------------------------------------------------
 identify:
   mode: both
-  marker_file: /etc/opm-card-id      # optional: drop this file on each Pi for a custom name
-  content_sources:                   # tried in order; first non-empty wins
-    - /etc/hostname
-    - /etc/machine-id
+  marker_file: /etc/opm-card-id      # optional: a custom stable id you drop on each Pi
 
 # ----------------------------------------------------------------------------
 # SAFETY: only treat a partition as an Orange Pi card if its ext filesystem
@@ -52,7 +53,8 @@ mount:
 
 after_copy:
   verify: true                       # checksum-verify every copied file before any deletion
-  delete_source: true                # YOUR CHOICE #4: remove verified files from the card
+  delete_source: true                # CLI only: remove verified files from the card. The web
+                                     # UI ignores this — deletion there is the red "Copy + delete" button.
   prune_empty_dirs: true             # remove dirs left empty by deletion (within copied trees only)
 
 copy:

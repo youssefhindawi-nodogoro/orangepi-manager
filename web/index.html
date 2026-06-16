@@ -10,14 +10,14 @@
     --fg:#e6edf3; --mut:#8b98a8; --acc:#ff7a18; --ok:#3fb950; --warn:#d29922; --bad:#f85149; --blu:#388bfd;
   }
   *{box-sizing:border-box}
-  body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,Segoe UI,Roboto,sans-serif}
+  body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,Segoe UI,Roboto,sans-serif;overflow-x:hidden}
   header{display:flex;align-items:center;gap:12px;padding:14px 20px;background:var(--panel);border-bottom:1px solid var(--line)}
   header h1{font-size:17px;margin:0;font-weight:600}
   header .dot{color:var(--acc)}
   .role{margin-left:auto;font-size:12px;padding:4px 10px;border-radius:999px;border:1px solid var(--line);color:var(--mut)}
   .role.root{color:var(--ok);border-color:var(--ok)} .role.noroot{color:var(--warn);border-color:var(--warn)}
-  main{max-width:1000px;margin:0 auto;padding:20px;display:grid;gap:16px}
-  .panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px}
+  main{max-width:1000px;margin:0 auto;padding:20px;display:grid;grid-template-columns:minmax(0,1fr);gap:16px}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px;min-width:0}
   .panel h2{margin:0 0 12px;font-size:14px;font-weight:600;color:var(--mut);text-transform:uppercase;letter-spacing:.04em}
   .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
   button{background:var(--panel2);color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:8px 14px;font-size:13px;cursor:pointer}
@@ -38,7 +38,8 @@
   textarea{min-height:70px;resize:vertical}
   .hint{color:var(--mut);font-size:12px}
   .check{display:flex;gap:8px;align-items:center}
-  .cardgrid{display:flex;gap:10px;overflow-x:auto;overflow-y:hidden;padding-bottom:8px;scroll-snap-type:x proximity}
+  .cardgrid{display:flex;gap:10px;overflow-x:auto;overflow-y:hidden;max-width:100%;padding-bottom:8px;scroll-snap-type:x proximity;
+            scrollbar-width:thin;scrollbar-color:var(--line) var(--bg)}
   .cardgrid > .ccard{flex:0 0 300px;scroll-snap-align:start}
   .cardgrid::-webkit-scrollbar{height:10px}
   .cardgrid::-webkit-scrollbar-thumb{background:var(--line);border-radius:999px}
@@ -64,7 +65,8 @@
   .fit.bad{background:rgba(248,81,73,.12);border:1px solid var(--bad);color:#ffb3ae}
   .fit.warn{background:rgba(210,153,34,.12);border:1px solid var(--warn);color:#f0d28a}
   details{margin:6px 0} summary{cursor:pointer;color:var(--mut);font-size:12px;padding:2px 0}
-  .subsys{border-left:2px solid var(--line);margin:4px 0 6px 4px;padding-left:8px;overflow-x:auto}
+  .subsys{border-left:2px solid var(--line);margin:4px 0 6px 4px;padding-left:8px;overflow-x:auto;
+          scrollbar-width:thin;scrollbar-color:var(--line) var(--bg)}
   .sesstbl{width:100%;border-collapse:collapse;font-size:12px;margin:2px 0}
   .sesstbl th,.sesstbl td{padding:3px 6px;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap}
   .sesstbl th{color:var(--mut);font-weight:500;font-size:11px}
@@ -78,10 +80,24 @@
   .srow .spct{flex:0 0 30px;text-align:right;color:var(--mut)}
   .prow{padding:4px 0;border-bottom:1px solid var(--line);font-size:11px}
   .prow:last-child{border-bottom:0}
-  .prow .ptop{display:flex;gap:8px;align-items:baseline}
+  .prow .ptop{display:flex;gap:8px;align-items:center}
   .prow .ptop .w{flex:1 1 auto;min-width:0;color:var(--fg);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .prow .ptop .z{flex:0 0 auto;color:var(--mut)}
   .prow .recs{color:var(--mut);word-break:break-word}
+  .thumb{flex:0 0 auto;height:32px;border-radius:3px;border:1px solid var(--line);cursor:pointer;background:#000;object-fit:cover}
+  .thumb:hover{border-color:var(--acc)}
+  .modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.82);z-index:50;align-items:center;justify-content:center}
+  .modal.open{display:flex}
+  .modalbox{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px;max-width:94vw;max-height:92vh}
+  .modalbar{display:flex;justify-content:space-between;align-items:center;gap:14px;margin-bottom:8px}
+  #modalvid{max-width:90vw;max-height:80vh;display:block;background:#000;border-radius:6px}
+  .fslist{max-height:46vh;overflow:auto;border:1px solid var(--line);border-radius:8px;background:var(--bg);scrollbar-width:thin;scrollbar-color:var(--line) var(--bg)}
+  .fsrow{padding:7px 12px;border-bottom:1px solid var(--line);cursor:pointer;font-size:13px}
+  .fsrow:last-child{border-bottom:0}
+  .fsrow:hover{background:var(--panel2)}
+  .chip{display:inline-block;font-size:12px;padding:4px 10px;border:1px solid var(--line);border-radius:999px;cursor:pointer;color:var(--mut)}
+  .chip:hover{border-color:var(--acc);color:var(--fg)}
+  .chip.active{border-color:var(--acc);color:var(--fg);background:var(--panel2)}
   pre#log{background:#0a0e13;border:1px solid var(--line);border-radius:8px;padding:10px;max-height:260px;overflow:auto;font-size:12px;white-space:pre-wrap;margin:0}
   .msg{padding:8px 12px;border-radius:8px;font-size:13px;margin-bottom:10px}
   .msg.err{background:rgba(248,81,73,.12);border:1px solid var(--bad);color:#ffb3ae}
@@ -119,23 +135,27 @@
     </label>
     <label class="fld">
       <span>Destination on this PC (or an external drive mount)</span>
-      <input id="dest" type="text">
+      <div class="row" style="gap:8px">
+        <input id="dest" type="text" style="flex:1 1 auto">
+        <button type="button" onclick="openBrowser()">📁 Browse…</button>
+      </div>
     </label>
-    <div class="row">
-      <label class="check"><input id="del" type="checkbox"> <span>Delete source files from card after a verified copy</span></label>
-    </div>
     <div class="row" style="margin-top:10px">
       <button onclick="applyConfig()">Apply &amp; check space</button>
       <span id="cfgnote" class="hint"></span>
     </div>
+    <p class="hint" style="margin:8px 0 0">Deletion is controlled only by the red <b>Copy + delete source</b> button below (which asks to confirm) — there is no separate delete toggle.</p>
     <p class="hint" style="margin:10px 0 0">Safety label: <code id="reqlabel" class="mono"></code> · only matching cards are touched. Changes apply to the running server; edit <code>config.yaml</code> to persist.</p>
   </section>
 
   <!-- PLAN -->
   <section class="panel">
     <h2>3 &middot; Plan &amp; disk space</h2>
-    <div class="row" style="margin-bottom:6px"><button onclick="precheck()">↻ Recheck</button>
-      <span class="hint">size to copy, free space on the Orange Pi card and on the destination, and per-session date/time.</span></div>
+    <div class="row" style="margin-bottom:6px">
+      <button class="primary" onclick="checkDuplicates()">↻ Recheck (space + duplicates)</button>
+      <span class="hint">checks free space AND what's already in the destination vs what's new.</span>
+    </div>
+    <div id="dupverdict"></div>
     <div id="plan" class="hint">…</div>
   </section>
 
@@ -150,6 +170,32 @@
     </div>
     <p class="hint" style="margin:10px 0 0">Copy buttons stay disabled until the plan confirms the data fits the destination. “Copy + delete” only removes files that pass a checksum re-verify.</p>
   </section>
+
+  <!-- VIDEO PREVIEW MODAL -->
+  <div id="modal" class="modal" onclick="if(event.target.id==='modal')closeModal()">
+    <div class="modalbox">
+      <div class="modalbar"><span id="modalcap" class="mono hint"></span><button onclick="closeModal()">✕ close</button></div>
+      <div id="modalclips" class="row" style="gap:6px;margin-bottom:8px;flex-wrap:wrap"></div>
+      <video id="modalvid" controls preload="metadata"></video>
+    </div>
+  </div>
+
+  <!-- DESTINATION FOLDER PICKER -->
+  <div id="fsmodal" class="modal" onclick="if(event.target.id==='fsmodal')closeBrowser()">
+    <div class="modalbox" style="width:680px;max-width:94vw">
+      <div class="modalbar"><b>Choose destination folder</b><button onclick="closeBrowser()">✕ close</button></div>
+      <div id="fsmounts" class="row" style="margin-bottom:8px"></div>
+      <div class="row" style="gap:8px;margin-bottom:8px">
+        <button onclick="fsUp()">↑ Up</button>
+        <span id="fspath" class="mono" style="flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
+      </div>
+      <div id="fslist" class="fslist"></div>
+      <div class="row" style="justify-content:space-between;margin-top:10px">
+        <span id="fsfree" class="hint"></span>
+        <button class="primary" onclick="fsUse()">Use this folder</button>
+      </div>
+    </div>
+  </div>
 
   <!-- PROGRESS -->
   <section class="panel">
@@ -204,13 +250,12 @@ async function loadConfig(){
   setRole(c.is_root);
   $('paths').value = (c.copy_paths||[]).join('\n');
   $('dest').value = c.destination||'';
-  $('del').checked = !!c.delete_source;
   $('reqlabel').textContent = c.require_label || '(any ext fs — unguarded)';
 }
 
 async function applyConfig(){
   const paths = $('paths').value.split('\n').map(s=>s.trim()).filter(Boolean);
-  const c = await jpost('/api/config', {copy_paths:paths, destination:$('dest').value, delete_source:$('del').checked});
+  const c = await jpost('/api/config', {copy_paths:paths, destination:$('dest').value});
   $('cfgnote').textContent = c.placeholder ? '⚠ paths still contain the REPLACE_ME placeholder' : 'applied ✓';
   $('cfgnote').className = 'hint ' + (c.placeholder?'stat-warn':'stat-ok');
   await precheck();
@@ -224,24 +269,98 @@ async function precheck(){
   renderPlan(p);
 }
 
-function sessionsHtml(sessions){
+async function checkDuplicates(){
+  $('dupverdict').innerHTML = '<div class="fit warn">Checking destination for already-copied recordings…</div>';
+  await precheck();
+  $('dupverdict').scrollIntoView({behavior:'smooth', block:'nearest'});
+}
+
+function sessionsHtml(sessions, slot){
   if(!sessions || !sessions.length) return '';
   const rows = sessions.map(s=>{
     const when = s.date ? `${s.date} ${s.time||''}`.trim() : (s.name||'?');
     const recs = Object.entries(s.types||{}).map(([k,v])=>`${k}×${v}`).join(', ')||'-';
+    const nm = encodeURIComponent(s.name||'');
+    const thumb = (slot!=null && s.name)
+      ? `<img class="thumb" loading="lazy" src="/api/thumb?slot=${slot}&session=${nm}" onerror="this.style.display='none'" onclick="openPreview(${slot},'${s.name}')" title="click to play">`
+      : '';
+    const tag = ('present' in s)
+      ? (s.present ? '<span class="stat-ok" title="already in destination — will be skipped">✓</span>'
+                   : '<span class="stat-warn" title="not yet copied">⬆</span>')
+      : '';
     return `<div class="prow" title="${s.name||''}">
-      <div class="ptop"><span class="w mono">${when}</span>
+      <div class="ptop">${thumb}${tag}<span class="w mono">${when}</span>
         <span class="z">${fmtBytes(s.bytes)}</span><span class="z">${s.files}f</span></div>
       <div class="recs">${recs}</div></div>`;
   }).join('');
-  return `<details class="sess"><summary>${sessions.length} recordings (date · time · records · size)</summary>
+  return `<details class="sess"><summary>${sessions.length} recordings (date · time · records · size · ▶ preview)</summary>
     <div class="subsys">${rows}</div></details>`;
 }
+
+async function openPreview(slot, session){
+  $('modal').classList.add('open');
+  $('modalcap').textContent=`slot ${slot} · ${session} — loading clips…`;
+  $('modalclips').innerHTML=''; $('modalvid').removeAttribute('src'); $('modalvid').load();
+  const d = await jget(`/api/videos?slot=${slot}&session=${encodeURIComponent(session)}`);
+  const vids = d.videos||[];
+  if(!vids.some(x=>x.bytes>0)){ $('modalcap').textContent=`slot ${slot} · ${session} — no playable video`; return; }
+  $('modalclips').innerHTML = vids.map((x,i)=>{
+    const dead = !x.bytes;
+    return `<span class="chip${dead?' hint':''}" id="clip${i}" ${dead?'':`onclick="playClip(${slot},'${esc(session)}','${esc(x.file)}',${i})"`} title="${fmtBytes(x.bytes)}">${i+1}. ${x.file}${dead?' (empty)':''}</span>`;
+  }).join('');
+  const first = vids.findIndex(x=>x.bytes>0);
+  playClip(slot, session, vids[first].file, first);
+}
+function playClip(slot, session, file, idx){
+  const v=$('modalvid'), cap=$('modalcap');
+  document.querySelectorAll('#modalclips .chip').forEach((c,i)=>c.classList.toggle('active', i===idx));
+  cap.textContent=`slot ${slot} · ${session} · ${file} — preparing preview (HEVC→H.264)…`;
+  v.onloadeddata=()=>{ cap.textContent=`slot ${slot} · ${session} · ${file} — preview (downsampled)`; };
+  v.onerror=()=>{ cap.textContent=`slot ${slot} · ${session} · ${file} — preview unavailable`; };
+  v.src=`/api/video?slot=${slot}&session=${encodeURIComponent(session)}&file=${encodeURIComponent(file)}`;
+  v.load(); v.play().catch(()=>{});
+}
+function closeModal(){
+  const v=$('modalvid'); v.pause(); v.removeAttribute('src'); v.load();
+  $('modalclips').innerHTML=''; $('modal').classList.remove('open');
+}
+document.addEventListener('keydown', e=>{ if(e.key==='Escape'){ closeModal(); closeBrowser(); } });
+
+let fsCur=null, fsParent=null;
+function esc(s){ return (s||'').replace(/\\/g,'\\\\').replace(/'/g,"\\'"); }
+function openBrowser(){ fsNav($('dest').value||''); $('fsmodal').classList.add('open'); }
+function closeBrowser(){ $('fsmodal').classList.remove('open'); }
+async function fsNav(path){
+  const d = await jget('/api/listdir?path='+encodeURIComponent(path||''));
+  fsCur = d.path; fsParent = d.parent;
+  $('fspath').textContent = d.path; $('fspath').title = d.path;
+  $('fsfree').textContent = `${fmtBytes(d.free)} free of ${fmtBytes(d.total)}${d.writable?'':' · not writable here'}`;
+  $('fsfree').className = 'hint ' + (d.writable?'':'stat-warn');
+  $('fsmounts').innerHTML =
+    (d.mounts||[]).map(m=>`<span class="chip" onclick="fsNav('${esc(m.path)}')" title="${fmtBytes(m.free)} free of ${fmtBytes(m.total)}">${m.tran==='usb'?'💾 ':'🗄 '}${m.label||m.path} · ${fmtBytes(m.free)}</span>`).join('')
+    + (d.home?`<span class="chip" onclick="fsNav('${esc(d.home)}')">🏠 home</span>`:'');
+  let rows = d.parent ? `<div class="fsrow" onclick="fsNav('${esc(d.parent)}')">⬑ ..</div>` : '';
+  rows += (d.dirs||[]).map(e=>`<div class="fsrow" onclick="fsNav('${esc(e.path)}')">📁 ${e.name}</div>`).join('');
+  if(!d.dirs || !d.dirs.length) rows += '<div class="fsrow hint">(no sub-folders here)</div>';
+  $('fslist').innerHTML = rows;
+}
+function fsUp(){ if(fsParent) fsNav(fsParent); }
+function fsUse(){ if(fsCur){ $('dest').value = fsCur; closeBrowser(); applyConfig(); } }
 
 function renderPlan(p){
   if(p.error){ $('plan').innerHTML=`<div class="fit bad">${p.error}</div>`; planFits=false; updateRunButtons(); return; }
   planPlaceholder = p.placeholder;
   planFits = p.fits && p.cards.length>0 && !p.placeholder;
+  // duplicate-check verdict (shown above the plan)
+  let verdict = '';
+  if(p.cards && p.cards.length && !p.placeholder){
+    const tn = p.total_new||0, tp = p.total_present||0, tot = tn+tp;
+    if(tot && tn===0)
+      verdict = `<div class="fit ok"><b>✓ Nothing new to copy</b> — all ${tot} recording(s) are already in the destination.</div>`;
+    else if(tot)
+      verdict = `<div class="fit warn"><b>⬆ ${tn} new recording(s) to copy</b> (${fmtBytes(p.need)})${tp?` · ${tp} already in the destination (skipped)`:''}.</div>`;
+  }
+  if($('dupverdict')) $('dupverdict').innerHTML = verdict;
   let html='';
   if(p.placeholder) html += `<div class="fit warn">Set real paths in “What to copy” above, then Apply.</div>`;
   else if(!p.cards.length) html += `<div class="fit warn">No eligible cards selected.</div>`;
@@ -253,14 +372,23 @@ function renderPlan(p){
       : `Fits — needs ${fmtBytes(p.need)} of ${fmtBytes(p.dest_free)} free → ${fmtBytes(p.after_free)} left after.${p.tight?' (low headroom)':''}`;
     html += `<div class="fit ${cls}">${msg}</div>`;
   }
+  if(p.dest_is_fat32){
+    const over = p.fat_oversize || [];
+    let m = 'Destination is FAT32: ownership/permissions aren\'t preserved (fine for recordings)';
+    m += over.length
+      ? `, and <b>${over.length} file(s) are ≥ 4 GB and cannot be stored</b> (e.g. ${over[0].file} = ${fmtBytes(over[0].bytes)}). Use exFAT or NTFS for those.`
+      : ' — no file exceeds the 4 GB FAT32 limit, so you\'re fine.';
+    html += `<div class="fit ${over.length?'bad':'warn'}">⚠ ${m}</div>`;
+  }
   let cards='';
   for(const c of p.cards){
     cards += `<div class="ccard">
-      <div class="top"><span class="cid">slot ${c.slot} · ${c.label||c.card_id}</span>
+      <div class="top"><span class="cid">slot ${c.slot} · ${c.card_id}</span>
         <span class="hint mono">${c.disk}</span></div>
-      <div>to copy: <b>${fmtBytes(c.bytes)}</b> · ${c.files} files · ${c.sessions.length} recordings</div>
+      <div class="hint mono" title="destination folder for this card">→ ${c.card_id}/</div>
+      <div>to copy: <b>${fmtBytes(c.new_bytes)}</b> new${c.present_count?` · <span class="stat-ok">${c.present_count} already there</span>`:''} · ${(c.sessions||[]).length} recordings</div>
       <div class="hint">Orange Pi card free: ${fmtBytes(c.src_free)} of ${fmtBytes(c.src_total)}</div>
-      ${sessionsHtml(c.sessions)}
+      ${sessionsHtml(c.sessions, c.slot)}
     </div>`;
   }
   if(cards) html += `<div class="cardgrid" style="margin-top:8px">${cards}</div>`;
@@ -285,7 +413,7 @@ async function run(opts){
   if(!opts.dry_run && !planFits){ showRunMsg('Not enough space at the destination — see Plan & space.'); return; }
   const r = await jpost('/api/run', Object.assign({slots}, opts));
   if(r.error){ showRunMsg(r.error); return; }
-  ejected.clear(); showRunMsg(''); startPolling();
+  ejectState = {}; showRunMsg(''); startPolling();
 }
 
 function runDelete(){
@@ -299,27 +427,38 @@ function startPolling(){ if(polling) clearInterval(polling); poll(); polling=set
 
 async function poll(){
   const s = await jget('/api/status');
+  lastStatus = s;
   renderProgress(s);
   if(!s.running && s.finished_at){ clearInterval(polling); polling=null; updateRunButtons(); detect(); }
 }
 
-let ejected = new Set();
+let ejectState = {};   // slot -> {ok:bool, msg:string, busy:bool}
+let lastStatus = null; // last /api/status snapshot, so eject can re-render on demand
+
 function doneBanner(c){
   const ok = c.status==='ok';
   const label = ok ? '✓ Done — safe to remove this card' : `finished: ${c.status}`;
-  const ctrl = ejected.has(c.slot)
-    ? '<span class="stat-ok">⏏ unmounted — safe to remove</span>'
-    : `<button id="eject${c.slot}" onclick="ejectSlot(${c.slot})">⏏ Safe remove (unmount)</button>`;
-  return `<div class="donebar"><span class="${ok?'stat-ok':'stat-bad'}">${label}</span>${ctrl}</div>`;
+  const es = ejectState[c.slot];
+  let ctrl;
+  if(es && es.ok){
+    ctrl = `<span class="stat-ok">⏏ ${es.msg}</span>`;
+  } else {
+    const err = es ? `<span class="stat-bad" style="margin-right:8px">${es.msg}</span>` : '';
+    ctrl = `${err}<button id="eject${c.slot}" onclick="ejectSlot(${c.slot})">⏏ Safe remove (unmount)</button>`;
+  }
+  return `<div class="donebar"><span class="${ok?'stat-ok':'stat-bad'}">${label}</span><span>${ctrl}</span></div>`;
 }
 
 async function ejectSlot(slot){
   const b=document.getElementById('eject'+slot);
   if(b){ b.disabled=true; b.textContent='unmounting…'; }
-  const r=await jpost('/api/eject',{slot});
-  if(r.error){ if(b){ b.disabled=false; b.textContent='⏏ Safe remove (unmount)'; } showRunMsg(r.error); return; }
-  ejected.add(slot);
-  if(b) b.outerHTML='<span class="stat-ok">⏏ unmounted — safe to remove</span>';
+  let r;
+  try { r = await jpost('/api/eject', {slot}); }
+  catch(e){ r = {error: 'request failed: ' + e}; }
+  ejectState[slot] = r.error
+    ? {ok:false, msg:r.error}
+    : {ok:true, msg:(r.message || 'unmounted — safe to remove')};
+  if(lastStatus) renderProgress(lastStatus);   // show result inline, even if polling stopped
 }
 
 function sessRows(c){

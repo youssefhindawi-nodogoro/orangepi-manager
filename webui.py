@@ -13,25 +13,204 @@ Run:
 Then open  http://127.0.0.1:8765  (bound to localhost only, on purpose).
 """
 import copy
+import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 import opm  # the CLI engine
 
-HOST, PORT = "127.0.0.1", 8765
+HOST = "127.0.0.1"
+PORT = int(os.environ.get("OPM_PORT", "8765"))
 SCRIPT_DIR = Path(__file__).resolve().parent
 WEB_DIR = SCRIPT_DIR / "web"
+THUMB_DIR = Path(tempfile.gettempdir()) / "opm-thumbs"
 
 CFG = opm.load_config(str(SCRIPT_DIR / "config.yaml"))  # UI edits this copy in memory
+
+_SAFE_SEG = re.compile(r"^[A-Za-z0-9._-]+$")             # a single safe path segment
+_VID_EXT = (".mp4", ".mov", ".mkv", ".avi")
+
+
+def _session_dir(slot, session):
+    """Validated absolute session directory STRICTLY inside the card mount, or None
+    (segments validated; resolved realpath must stay under the card mountpoint)."""
+    if slot is None or not session or not _SAFE_SEG.match(session) or session in (".", ".."):
+        return None
+    try:
+        slot = int(slot)
+    except (TypeError, ValueError):
+        return None
+    card = next((c for c in opm.detect_cards(CFG) if c["slot"] == slot), None)
+    if not card or not card.get("mounted_at"):
+        return None
+    mnt = os.path.realpath(card["mounted_at"])
+    for p in CFG["copy_paths"]:
+        sess = os.path.realpath(os.path.join(mnt, p.lstrip("/"), session))
+        if (sess == mnt or sess.startswith(mnt + os.sep)) and os.path.isdir(sess):
+            return sess
+    return None
+
+
+def session_videos(slot, session):
+    """All video files in a session (sorted), as [{file, bytes}, …]."""
+    sess = _session_dir(slot, session)
+    if not sess:
+        return []
+    try:
+        names = sorted(os.listdir(sess))
+    except OSError:
+        return []
+    out = []
+    for f in names:
+        full = os.path.join(sess, f)
+        if f.lower().endswith(_VID_EXT) and os.path.isfile(full):
+            try:
+                out.append({"file": f, "bytes": os.path.getsize(full)})
+            except OSError:
+                pass
+    return out
+
+
+def session_video(slot, session, fname=None):
+    """Resolve one video for (slot, session): the named `fname` if given (validated),
+    else the first non-empty video. Absolute path or None."""
+    sess = _session_dir(slot, session)
+    if not sess:
+        return None
+    if fname:
+        if not _SAFE_SEG.match(fname) or fname in (".", ".."):
+            return None
+        cand = os.path.join(sess, fname)
+        return cand if (os.path.isfile(cand) and cand.lower().endswith(_VID_EXT)) else None
+    try:
+        names = sorted(os.listdir(sess))
+    except OSError:
+        return None
+    vids = [f for f in names
+            if f.lower().endswith(_VID_EXT) and os.path.getsize(os.path.join(sess, f)) > 0]
+    return os.path.join(sess, vids[0]) if vids else None
+
+
+def ensure_thumb(video):
+    """Cached 320px-wide JPEG thumbnail for a video; returns its path or None."""
+    try:
+        st = os.stat(video)
+    except OSError:
+        return None
+    key = hashlib.sha1(f"{video}:{st.st_mtime_ns}:{st.st_size}".encode()).hexdigest()
+    out = THUMB_DIR / f"{key}.jpg"
+    if out.exists() and out.stat().st_size > 0:
+        return out
+    THUMB_DIR.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["ffmpeg", "-nostdin", "-loglevel", "error", "-i", str(video),
+                    "-vf", "thumbnail,scale=320:-1", "-frames:v", "1", "-y", str(out)],
+                   capture_output=True)
+    return out if (out.exists() and out.stat().st_size > 0) else None
+
+
+def ensure_preview(video):
+    """Cached browser-playable H.264 preview for a video the browser can't decode
+    natively (these recordings are HEVC). Downsampled per the `preview` config —
+    by default the FULL recording (preview.seconds=0), scaled down + low fps so the
+    transcode stays fast and the clip is seekable once cached."""
+    try:
+        st = os.stat(video)
+    except OSError:
+        return None
+    pv = CFG.get("preview", {})
+    secs = int(pv.get("seconds", 0) or 0)
+    width = int(pv.get("width", 640))
+    fps = int(pv.get("fps", 15))
+    crf = int(pv.get("crf", 32))
+    key = hashlib.sha1(
+        f"prev:{video}:{st.st_mtime_ns}:{st.st_size}:{secs}:{width}:{fps}:{crf}".encode()
+    ).hexdigest()
+    out = THUMB_DIR / f"{key}.mp4"
+    if out.exists() and out.stat().st_size > 0:
+        return out
+    THUMB_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = out.with_suffix(".part")                       # atomic: don't serve a half file
+    cmd = ["ffmpeg", "-nostdin", "-loglevel", "error"]
+    if secs > 0:
+        cmd += ["-t", str(secs)]                         # INPUT-side: read only the first
+    cmd += ["-i", str(video),                            # `secs` seconds -> genuinely fast
+            "-vf", f"scale='min({width},iw)':-2", "-r", str(fps),
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf", str(crf),
+            "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-an",
+            "-f", "mp4", "-y", str(tmp)]
+    r = subprocess.run(cmd, capture_output=True)
+    if r.returncode == 0 and tmp.exists() and tmp.stat().st_size > 0:
+        os.replace(tmp, out)
+        return out
+    if tmp.exists():
+        tmp.unlink()
+    return None
+
+
+def rescan_usb():
+    """Force USB card readers to re-read their media so a newly-inserted card is
+    detected WITHOUT opening it in a file manager (these readers don't reliably
+    fire media-change events). Root only; skipped while a job is running."""
+    if os.geteuid() != 0 or JOB.running:
+        return
+    try:
+        data = json.loads(subprocess.run(["lsblk", "-J", "-o", "NAME,TRAN,TYPE"],
+                                          text=True, capture_output=True).stdout)
+    except Exception:                                  # noqa: BLE001
+        return
+    rescanned = False
+    for d in data.get("blockdevices", []):
+        if d.get("type") == "disk" and d.get("tran") == "usb":
+            try:
+                with open(f"/sys/block/{d['name']}/device/rescan", "w") as fh:
+                    fh.write("1\n")
+                rescanned = True
+            except OSError:
+                pass
+    if rescanned:
+        subprocess.run(["udevadm", "settle", "--timeout=3"], capture_output=True)
+
+
+def browse_mount(cards):
+    """Read-only mount eligible-but-unmounted cards so the UI can read their sizes,
+    sessions and video thumbnails without opening them in a file manager. Root only;
+    skipped during a job. Mounts under cfg.mount.base so process_card recognises and
+    manages them (and can switch to read-write for a verified delete)."""
+    if os.geteuid() != 0 or JOB.running:
+        return
+    for c in cards:
+        if not c.get("eligible") or c.get("mounted_at") or not c.get("rootpart"):
+            continue
+        mnt = os.path.join(CFG["mount"]["base"], f"slot{c['slot']}")
+        try:
+            os.makedirs(mnt, exist_ok=True)
+            subprocess.run(["mount", "-o", "ro,noload", c["rootpart"], mnt],
+                           text=True, capture_output=True)
+            m = opm.existing_mount(c["rootpart"])
+            if m:
+                c["mounted_at"] = m
+        except Exception:                              # noqa: BLE001
+            pass
+
+
+def detect_ready():
+    """opm.detect_cards + media rescan + read-only browse-mount (root), so cards are
+    visible and readable without first opening them in the desktop file manager."""
+    rescan_usb()
+    cards = opm.detect_cards(CFG)
+    browse_mount(cards)
+    return cards
 
 
 # --------------------------------------------------------------------------- #
@@ -180,12 +359,13 @@ def sampler_loop(src_devs, dest_dev, cfg, stop_evt):
 
 def run_job(dry, no_delete, slots):
     cfg = CFG
-    cards = opm.detect_cards(cfg)
+    cards = detect_ready()
     usable = [c for c in cards if c.get("eligible")]
     if slots:
         usable = [c for c in usable if c["slot"] in slots]
-    do_delete = (cfg["after_copy"].get("delete_source", False)
-                 and not no_delete and not dry)
+    # Web UI: deletion is driven solely by the red "Copy + delete source" button
+    # (which sends no_delete=false after a confirm dialog) — there is no delete toggle.
+    do_delete = not no_delete and not dry
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
     assigned, lock = set(), threading.Lock()
 
@@ -322,6 +502,62 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _serve_file_range(self, path, ctype):
+        """Serve a (possibly large) file, honouring a Range request so <video> can
+        stream/seek without downloading the whole thing."""
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            return self._json({"error": "not found"}, 404)
+        start, end, status = 0, size - 1, 200
+        rng = self.headers.get("Range")
+        if rng and rng.startswith("bytes="):
+            s, _, e = rng[6:].partition("-")
+            start = int(s) if s.isdigit() else 0
+            end = int(e) if e.isdigit() else size - 1
+            end = min(end, size - 1)
+            if start > end or start >= size:
+                self.send_response(416)
+                self.send_header("Content-Range", f"bytes */{size}")
+                self.end_headers()
+                return
+            status = 206
+        self.send_response(status)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Content-Length", str(end - start + 1))
+        if status == 206:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+        self.end_headers()
+        with open(path, "rb") as f:
+            f.seek(start)
+            remaining = end - start + 1
+            while remaining > 0:
+                chunk = f.read(min(262144, remaining))
+                if not chunk:
+                    break
+                try:
+                    self.wfile.write(chunk)
+                except (BrokenPipeError, ConnectionResetError):
+                    break
+                remaining -= len(chunk)
+
+    def _preview(self, want):
+        """Resolve ?slot=&session=&file= to a video; serve its thumbnail or a
+        browser-playable H.264 preview clip (the originals are HEVC)."""
+        q = parse_qs(urlparse(self.path).query)
+        v = session_video(q.get("slot", [None])[0], q.get("session", [None])[0],
+                          q.get("file", [None])[0])
+        if not v:
+            return self._json({"error": "no video"}, 404)
+        if want == "thumb":
+            t = ensure_thumb(v)
+            return self._serve_file_range(str(t), "image/jpeg") if t \
+                else self._json({"error": "no preview"}, 404)
+        clip = ensure_preview(v)
+        return self._serve_file_range(str(clip), "video/mp4") if clip \
+            else self._json({"error": "transcode failed"}, 500)
+
     def _body(self):
         n = int(self.headers.get("Content-Length") or 0)
         if not n:
@@ -342,6 +578,17 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(api_config_get())
         if path == "/api/status":
             return self._json(JOB.snapshot())
+        if path == "/api/thumb":
+            return self._preview("thumb")
+        if path == "/api/video":
+            return self._preview("video")
+        if path == "/api/videos":
+            q = parse_qs(urlparse(self.path).query)
+            return self._json({"videos": session_videos(q.get("slot", [None])[0],
+                                                         q.get("session", [None])[0])})
+        if path == "/api/listdir":
+            q = parse_qs(urlparse(self.path).query)
+            return self._json(api_listdir(q.get("path", [None])[0]))
         return self._json({"error": "not found"}, 404)
 
     def do_POST(self):
@@ -362,7 +609,7 @@ class Handler(BaseHTTPRequestHandler):
 # --------------------------------------------------------------------------- #
 def api_detect():
     try:
-        cards = opm.detect_cards(CFG)
+        cards = detect_ready()
     except Exception as e:                                 # noqa: BLE001
         return {"error": str(e), "cards": [], "count": 0, "eligible": 0}
     for c in cards:
@@ -399,18 +646,69 @@ def api_config_set(body):
     return api_config_get()
 
 
+def list_mounts():
+    """Mounted, real filesystems (drives) for the destination picker's quick-jump."""
+    out, seen = [], set()
+    try:
+        data = json.loads(subprocess.run(
+            ["lsblk", "-J", "-e", "7", "-o", "NAME,MOUNTPOINT,LABEL,TRAN,FSTYPE"],
+            text=True, capture_output=True).stdout)
+    except Exception:                                  # noqa: BLE001
+        return out
+
+    def walk(nodes):
+        for n in nodes:
+            mp = n.get("mountpoint")
+            if (mp and mp.startswith("/") and n.get("fstype")
+                    and mp not in seen and not mp.startswith(("/boot", "/snap"))):
+                seen.add(mp)
+                free, total = opm.disk_free(mp)
+                out.append({"path": mp, "label": n.get("label") or n.get("name"),
+                            "tran": n.get("tran") or "", "free": free, "total": total})
+            walk(n.get("children") or [])
+    walk(data.get("blockdevices", []))
+    return out
+
+
+def api_listdir(path):
+    """Read-only listing of a directory's sub-folders for the destination picker,
+    with free space and quick-jump mounts."""
+    user = os.environ.get("SUDO_USER")
+    home = os.path.expanduser(f"~{user}") if user else os.path.expanduser("~")
+    if not os.path.isdir(home):
+        home = "/home"
+    path = os.path.realpath(path or home)
+    if not os.path.isdir(path):
+        path = home if os.path.isdir(home) else "/"
+    dirs, err = [], None
+    try:
+        for name in sorted(os.listdir(path), key=str.lower):
+            full = os.path.join(path, name)
+            if not name.startswith(".") and os.path.isdir(full):
+                dirs.append({"name": name, "path": full})
+    except OSError as e:
+        err = str(e)
+    free, total = opm.disk_free(path)
+    return {"path": path, "parent": (os.path.dirname(path) if path != "/" else None),
+            "dirs": dirs, "free": free, "total": total, "home": home, "error": err,
+            "writable": os.access(path, os.W_OK), "mounts": list_mounts()}
+
+
 def api_precheck(body):
     """Per-card data size + free space on the card (Orange Pi) and on the
     destination, plus a fits/doesn't-fit verdict and the session breakdown."""
     slots = {int(s) for s in (body.get("slots") or [])}
-    cards = opm.detect_cards(CFG)
+    cards = detect_ready()
     usable = [c for c in cards
               if c.get("eligible") and (not slots or c["slot"] in slots)]
     dest_free, dest_total = opm.disk_free(CFG["destination"])
+    flatten = CFG["copy"].get("flatten", True)
     per, need = [], 0
     for c in usable:
         mnt = c.get("mounted_at")
-        cb = cf = 0
+        cid = opm.card_id_for(mnt, CFG, c["slot"]) if mnt else f"slot{c['slot']}"
+        dest_card = os.path.join(CFG["destination"], cid)
+        cb = cf = newb = present = 0
         sessions = []
         for p in CFG["copy_paths"]:
             full = os.path.join(mnt, p.lstrip("/")) if mnt else ""
@@ -420,15 +718,39 @@ def api_precheck(body):
                 cf += f
                 for s in opm.list_sessions(full):
                     s["path"] = p
+                    # already transferred? dest session present with matching size + file count
+                    dsp = os.path.join(opm.dest_path_for(dest_card, p, flatten), s["name"])
+                    ds = opm.dir_stats(dsp) if os.path.isdir(dsp) else (0, 0, 0)
+                    s["present"] = (s["bytes"] > 0 and ds[0] >= s["bytes"]
+                                    and ds[1] >= s["files"])
+                    if s["present"]:
+                        present += 1
+                    else:
+                        newb += s["bytes"]
                     sessions.append(s)
-        need += cb
+        need += newb
         sfree, stotal = opm.disk_free(mnt) if mnt else (0, 0)
-        per.append({"slot": c["slot"], "card_id": c.get("label") or f"slot{c['slot']}",
-                    "label": c.get("label"), "disk": c["disk"], "mounted_at": mnt,
-                    "bytes": cb, "files": cf, "sessions": sessions,
-                    "src_free": sfree, "src_total": stotal})
+        per.append({"slot": c["slot"], "card_id": cid, "label": c.get("label"),
+                    "disk": c["disk"], "mounted_at": mnt, "dest_card": dest_card,
+                    "bytes": cb, "new_bytes": newb, "files": cf,
+                    "present_count": present, "new_count": len(sessions) - present,
+                    "sessions": sessions, "src_free": sfree, "src_total": stotal})
+    dest_fs = opm._fs_type(CFG["destination"])
+    fat32 = dest_fs.lower() in {"vfat", "fat", "fat12", "fat16", "fat32", "msdos"}
+    oversize = []
+    if fat32:                                          # FAT32 can't store a file >= 4 GiB
+        for c in usable:
+            mnt = c.get("mounted_at")
+            for p in CFG["copy_paths"]:
+                full = os.path.join(mnt, p.lstrip("/")) if mnt else ""
+                if full and os.path.isdir(full):
+                    for rel, sz in opm.oversized_files(full, 4 * 1024 ** 3):
+                        oversize.append({"slot": c["slot"], "file": rel, "bytes": sz})
     return {"destination": CFG["destination"],
-            "dest_free": dest_free, "dest_total": dest_total,
+            "dest_free": dest_free, "dest_total": dest_total, "dest_fs": dest_fs,
+            "dest_is_fat32": fat32, "fat_oversize": oversize,
+            "total_new": sum(c["new_count"] for c in per),
+            "total_present": sum(c["present_count"] for c in per),
             "need": need, "fits": need <= dest_free, "after_free": dest_free - need,
             "tight": need <= dest_free and (dest_free - need) < 5 * (1024 ** 3),
             "cards": per, "is_root": os.geteuid() == 0,
@@ -445,7 +767,7 @@ def api_run(body):
             return {"error": "A job is already running."}
     if not CFG["copy_paths"] or any(opm.PLACEHOLDER in p for p in CFG["copy_paths"]):
         return {"error": f"Set real copy_paths first (still contains {opm.PLACEHOLDER})."}
-    cards = opm.detect_cards(CFG)
+    cards = detect_ready()
     if not any(c.get("eligible") for c in cards):
         return {"error": "No eligible Orange Pi cards detected."}
     dry = bool(body.get("dry_run"))
@@ -478,17 +800,28 @@ def api_eject(body):
     subprocess.run(["sync"])
     out = subprocess.run(["lsblk", "-nro", "MOUNTPOINT", disk],
                          text=True, capture_output=True).stdout
-    mps = [m.strip() for m in out.splitlines() if m.strip()]
-    errors = []
+    mps = [m.strip() for m in out.splitlines() if m.strip().startswith("/")]
+    errors, lazy = [], []
     for m in mps:
-        r = subprocess.run(["umount", m], text=True, capture_output=True)
-        if r.returncode != 0:
-            errors.append(f"{m}: {r.stderr.strip()}")
+        if subprocess.run(["umount", m], text=True, capture_output=True).returncode == 0:
+            continue
+        # busy (e.g. a file manager has the folder open) -> lazy-detach; already synced
+        r2 = subprocess.run(["umount", "-l", m], text=True, capture_output=True)
+        if r2.returncode == 0:
+            lazy.append(m)
+        else:
+            errors.append(f"{m}: {(r2.stderr or '').strip() or 'busy'}")
     if errors:
         return {"error": "unmount failed - " + "; ".join(errors)}
-    return {"ok": True, "slot": int(slot), "unmounted": mps,
-            "message": (f"slot {slot} ({card.get('label') or disk}) unmounted - safe to remove."
-                        if mps else f"slot {slot} already unmounted - safe to remove.")}
+    label = card.get("label") or disk
+    if lazy:
+        msg = (f"slot {slot} ({label}) unmounted (a program still had it open — "
+               f"finish any transfers before pulling the card).")
+    elif mps:
+        msg = f"slot {slot} ({label}) unmounted - safe to remove."
+    else:
+        msg = f"slot {slot} ({label}) already unmounted - safe to remove."
+    return {"ok": True, "slot": int(slot), "unmounted": mps, "lazy": lazy, "message": msg}
 
 
 def main():

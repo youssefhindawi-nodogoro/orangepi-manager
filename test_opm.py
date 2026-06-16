@@ -243,7 +243,8 @@ class TestIdentify(Base):
         cid = self._id(self.card, 1, base_cfg(), set(), threading.Lock())
         self.assertEqual(cid, "orangepi5")
 
-    def test_dedup_clones(self):
+    def test_dedup_identical_clones(self):
+        # same hostname, NO machine-id -> identical ids -> within-run disambiguation
         write(self.card / "etc/hostname", "orangepi5\n")
         c2 = self.tmp / "card2"
         write(c2 / "etc/hostname", "orangepi5\n")
@@ -251,7 +252,30 @@ class TestIdentify(Base):
         a = self._id(self.card, 1, base_cfg(), assigned, lock)
         b = self._id(c2, 2, base_cfg(), assigned, lock)
         self.assertEqual(a, "orangepi5")
-        self.assertEqual(b, "orangepi5_slot2")     # clone disambiguated by slot
+        self.assertEqual(b, "orangepi5-2")
+
+    def test_machine_id_makes_each_card_unique(self):
+        # same hostname but DIFFERENT machine-id (real cloned cards) -> distinct folders
+        write(self.card / "etc/hostname", "orangepi5\n")
+        write(self.card / "etc/machine-id", "0de8ed155b1848b58569b87099be5d19\n")
+        c2 = self.tmp / "card2"
+        write(c2 / "etc/hostname", "orangepi5\n")
+        write(c2 / "etc/machine-id", "e7aa86bdc98c4e4d8ae3d10b3551902e\n")
+        assigned, lock = set(), threading.Lock()
+        a = self._id(self.card, 1, base_cfg(), assigned, lock)
+        b = self._id(c2, 2, base_cfg(), assigned, lock)
+        self.assertEqual(a, "orangepi5-0de8ed15")
+        self.assertEqual(b, "orangepi5-e7aa86bd")
+        self.assertNotEqual(a, b)
+
+    def test_machine_id_stable_across_runs_and_slots(self):
+        # the SAME card -> the SAME folder regardless of slot or run (no _slot churn)
+        write(self.card / "etc/hostname", "orangepi5\n")
+        write(self.card / "etc/machine-id", "0de8ed155b1848b58569b87099be5d19\n")
+        a = self._id(self.card, 1, base_cfg(), set(), threading.Lock())
+        b = self._id(self.card, 7, base_cfg(), set(), threading.Lock())
+        self.assertEqual(a, b)
+        self.assertEqual(a, "orangepi5-0de8ed15")
 
     def test_slot_mode(self):
         write(self.card / "etc/hostname", "orangepi5\n")
@@ -269,6 +293,22 @@ class TestIdentify(Base):
         cfg = base_cfg()
         cfg["identify"]["marker_file"] = "/etc/opm-card-id"
         self.assertEqual(self._id(self.card, 1, cfg, set(), threading.Lock()), "rig-A")
+
+
+class TestArchiveFlags(Base):
+    def test_unix_fs_full_preservation(self):
+        self.assertEqual(opm._flags_for_fs("ext4"), ["-aHAX", "--numeric-ids"])
+        self.assertEqual(opm._flags_for_fs("XFS"), ["-aHAX", "--numeric-ids"])
+
+    def test_fat_exfat_ntfs_drop_ownership(self):
+        for fs in ("vfat", "fat32", "exfat", "ntfs", "ntfs3", "fuseblk", "msdos"):
+            f = opm._flags_for_fs(fs)
+            self.assertNotIn("-aHAX", f)              # no owner/perm/ACL/xattr preservation
+            self.assertNotIn("--numeric-ids", f)
+            self.assertIn("-rt", f)                   # but still copy contents + times
+
+    def test_archive_flags_on_unix_tmpdir(self):
+        self.assertEqual(opm.archive_flags(self.tmp), ["-aHAX", "--numeric-ids"])
 
 
 if __name__ == "__main__":
