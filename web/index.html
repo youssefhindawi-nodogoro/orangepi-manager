@@ -209,7 +209,7 @@
 
 <script>
 const $ = id => document.getElementById(id);
-let polling = null, planFits = false, planPlaceholder = true;
+let planFits = false, planPlaceholder = true, jobRunning = false, tickN = 0;
 
 async function jget(u){ const r = await fetch(u); return r.json(); }
 async function jpost(u,b){ const r = await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b||{})}); return r.json(); }
@@ -401,9 +401,8 @@ function renderPlan(p){
 }
 
 function updateRunButtons(){
-  const running = !!polling;
-  $('b_dry').disabled = running || planPlaceholder;
-  const block = running || !planFits;
+  $('b_dry').disabled = jobRunning || planPlaceholder;
+  const block = jobRunning || !planFits;
   $('b_copy').disabled = block;
   $('b_del').disabled = block;
 }
@@ -417,7 +416,7 @@ async function run(opts){
   if(!opts.dry_run && !planFits){ showRunMsg('Not enough space at the destination — see Plan & space.'); return; }
   const r = await jpost('/api/run', Object.assign({slots}, opts));
   if(r.error){ showRunMsg(r.error); return; }
-  ejectState = {}; showRunMsg(''); startPolling();
+  ejectState = {}; showRunMsg(''); tick();   // pick up the new job immediately
 }
 
 function runDelete(){
@@ -427,13 +426,21 @@ function runDelete(){
   run({no_delete:false});
 }
 
-function startPolling(){ if(polling) clearInterval(polling); poll(); polling=setInterval(poll,1000); updateRunButtons(); }
-
-async function poll(){
-  const s = await jget('/api/status');
+// Single continuous poller (every 1s): always reflects the SERVER's current job in
+// the progress tab — whatever started it — and auto-detects cards when idle. So a
+// new copy (e.g. after swapping cards) shows up automatically, no manual refresh.
+async function tick(){
+  let s; try { s = await jget('/api/status'); } catch(e){ return; }
   lastStatus = s;
-  renderProgress(s);
-  if(!s.running && s.finished_at){ clearInterval(polling); polling=null; updateRunButtons(); detect(true); }
+  const justFinished = jobRunning && !s.running;
+  jobRunning = !!s.running;
+  if(s.running || justFinished || (tickN===0 && s.started_at)) renderProgress(s);
+  if(!s.running){
+    if(justFinished) detect(true);                          // copy done -> refresh plan/detection
+    else if(!document.hidden && tickN % 2 === 0) detect();  // idle: auto-detect ~every 2s
+  }
+  updateRunButtons();
+  tickN++;
 }
 
 async function cancelJob(){
@@ -468,7 +475,7 @@ async function ejectSlot(slot){
   ejectState[slot] = r.error
     ? {ok:false, msg:r.error}
     : {ok:true, msg:(r.message || 'unmounted — safe to remove')};
-  if(lastStatus) renderProgress(lastStatus);   // show result inline, even if polling stopped
+  if(lastStatus) renderProgress(lastStatus);   // reflect the eject result immediately
 }
 
 function sessRows(c){
@@ -531,15 +538,8 @@ function renderProgress(s){
 async function boot(){
   await loadConfig();
   await detect(true);
-  // reconnect to a job already running on the server (survives browser close/reopen)
-  try {
-    const s = await jget('/api/status');
-    lastStatus = s;
-    if(s.running){ renderProgress(s); startPolling(); }
-    else if(s.started_at){ renderProgress(s); }   // show the last finished result
-  } catch(e){}
-  // auto-detect cards every 2s while idle (never during a copy; tab must be visible)
-  setInterval(()=>{ if(!polling && !document.hidden) detect(); }, 2000);
+  await tick();                 // immediately reflect any running/finished job
+  setInterval(tick, 1000);      // then keep the progress + detection tabs live
 }
 boot();
 </script>
