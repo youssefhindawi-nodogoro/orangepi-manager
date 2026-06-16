@@ -51,13 +51,48 @@ PLACEHOLDER = "/REPLACE_ME"
 # --------------------------------------------------------------------------- #
 # small command helpers
 # --------------------------------------------------------------------------- #
-def run(cmd, check=True):
-    """Run a command, capturing output. Raises RuntimeError on failure if check."""
-    res = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+class Cancelled(Exception):
+    """Raised inside a cancellable run() when a stop was requested mid-command."""
+
+
+def run(cmd, check=True, stop=None, procs=None):
+    """Run a command, capturing output. Raises RuntimeError on failure if `check`.
+    If `stop` (a callable returning True to cancel) is given, run it as a tracked
+    subprocess (registered in `procs` = (set, lock)) and terminate it if stop() turns
+    true — raising Cancelled. rsync is safe to interrupt: fully-transferred files stay
+    intact and in-flight files are temp files that are never renamed into place."""
+    if stop is None:
+        res = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if check and res.returncode != 0:
+            raise RuntimeError(
+                f"command failed (rc={res.returncode}): {' '.join(cmd)}\n{res.stderr.strip()}")
+        return res
+    p = subprocess.Popen(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if procs is not None:
+        with procs[1]:
+            procs[0].add(p)
+    try:
+        while True:
+            try:
+                out, err = p.communicate(timeout=0.3)
+                break
+            except subprocess.TimeoutExpired:
+                if stop():
+                    p.terminate()
+                    try:
+                        out, err = p.communicate(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        p.kill()
+                        out, err = p.communicate()
+                    raise Cancelled()
+    finally:
+        if procs is not None:
+            with procs[1]:
+                procs[0].discard(p)
+    res = subprocess.CompletedProcess(cmd, p.returncode, out, err)
     if check and res.returncode != 0:
         raise RuntimeError(
-            f"command failed (rc={res.returncode}): {' '.join(cmd)}\n{res.stderr.strip()}"
-        )
+            f"command failed (rc={res.returncode}): {' '.join(cmd)}\n{(err or '').strip()}")
     return res
 
 
@@ -309,7 +344,7 @@ def archive_flags(dest):
     return _flags_for_fs(_fs_type(dest))
 
 
-def do_copy(mnt, dest, cfg, dry):
+def do_copy(mnt, dest, cfg, dry, stop=None, procs=None):
     if not dry:
         dest.mkdir(parents=True, exist_ok=True)
     flatten = cfg["copy"].get("flatten", True)
@@ -324,12 +359,12 @@ def do_copy(mnt, dest, cfg, dry):
         if dry:
             cmd.append("--dry-run")
         cmd += [src, str(dest) + "/"]
-        run(cmd)
+        run(cmd, stop=stop, procs=procs)
         copied.append(p)
     return copied, missing
 
 
-def verify(mnt, dest, cfg, paths):
+def verify(mnt, dest, cfg, paths, stop=None, procs=None):
     """Checksum dry-run; returns list of files that DON'T match (empty == verified)."""
     flatten = cfg["copy"].get("flatten", True)
     af = archive_flags(dest)
@@ -338,14 +373,14 @@ def verify(mnt, dest, cfg, paths):
         src, rflags = _rsync_src(mnt, p, flatten)
         cmd = (["rsync"] + af + ["-c", "-n"] + rflags + ["--out-format=%i %n"]
                + _excludes(cfg) + [src, str(dest) + "/"])
-        for line in run(cmd).stdout.splitlines():
+        for line in run(cmd, stop=stop, procs=procs).stdout.splitlines():
             code = line.split(" ", 1)[0]
             if code.startswith((">f", "<f", "cf")):   # a regular file would transfer => mismatch
                 failed.append(line)
     return failed
 
 
-def missing_on_dest(mnt, dest, cfg, paths):
+def missing_on_dest(mnt, dest, cfg, paths, stop=None, procs=None):
     """Files NOT yet present (matching size/mtime) at the destination. Empty list
     means every source file is safely on the destination. Uses an rsync dry-run
     (respects excludes; size+mtime, no checksums) so it's a fast final guard run
@@ -357,14 +392,14 @@ def missing_on_dest(mnt, dest, cfg, paths):
         src, rflags = _rsync_src(mnt, p, flatten)
         cmd = (["rsync"] + af + ["-n", "--out-format=%i %n"] + rflags
                + _excludes(cfg) + [src, str(dest) + "/"])
-        for line in run(cmd).stdout.splitlines():
+        for line in run(cmd, stop=stop, procs=procs).stdout.splitlines():
             parts = line.split(" ", 1)
             if parts[0].startswith((">f", "<f", "cf")):
                 miss.append(parts[1] if len(parts) > 1 else parts[0])
     return miss
 
 
-def delete_source(card, mnt, cfg, dest, paths, owned=True):
+def delete_source(card, mnt, cfg, dest, paths, owned=True, stop=None, procs=None):
     """Remove verified files from the card via rsync --remove-source-files, which
     re-checksums each file before deleting it. If we own a read-only mount, switch it
     to read-write first (with an e2fsck pass). If the desktop already has it mounted
@@ -380,7 +415,7 @@ def delete_source(card, mnt, cfg, dest, paths, owned=True):
                 return {"deleted": False, "error": f"e2fsck rc={rc}; delete aborted, source kept"}
         run(["mount", "-o", "rw", card["rootpart"], mnt])
     # SAFETY: never delete unless every file is confirmed present on the destination
-    miss = missing_on_dest(mnt, dest, cfg, paths)
+    miss = missing_on_dest(mnt, dest, cfg, paths, stop=stop, procs=procs)
     if miss:
         return {"deleted": False,
                 "error": f"delete aborted - {len(miss)} file(s) not confirmed on "
@@ -391,7 +426,7 @@ def delete_source(card, mnt, cfg, dest, paths, owned=True):
         src, rflags = _rsync_src(mnt, p, flatten)
         cmd = (["rsync"] + af + ["-c", "--remove-source-files"] + rflags
                + _excludes(cfg) + [src, str(dest) + "/"])
-        run(cmd)
+        run(cmd, stop=stop, procs=procs)
         if cfg["after_copy"].get("prune_empty_dirs", True):
             target = Path(mnt) / p.lstrip("/")
             if target.is_dir():
@@ -493,7 +528,8 @@ def disk_free(path):
 # --------------------------------------------------------------------------- #
 # per-card driver
 # --------------------------------------------------------------------------- #
-def process_card(card, cfg, ts, dry, do_delete, assigned, lock, on_stage=None):
+def process_card(card, cfg, ts, dry, do_delete, assigned, lock, on_stage=None,
+                 stop=None, procs=None):
     slot = card["slot"]
 
     def stage(s, info=None):
@@ -505,6 +541,10 @@ def process_card(card, cfg, ts, dry, do_delete, assigned, lock, on_stage=None):
     if not card.get("rootpart"):
         res.update(status="skipped", error=card.get("error", "no root partition"))
         stage("skipped")
+        return res
+    if stop and stop():                              # cancelled before we started this card
+        res.update(status="cancelled")
+        stage("done")
         return res
 
     own_mnt = os.path.join(cfg["mount"]["base"], f"slot{slot}")
@@ -526,7 +566,8 @@ def process_card(card, cfg, ts, dry, do_delete, assigned, lock, on_stage=None):
         dest = Path(cfg["destination"]) / res["card_id"]
         res["dest"] = str(dest)
         stage("copying", {"dest": str(dest), "src": use_mnt})
-        res["copied"], res["missing"] = do_copy(use_mnt, dest, cfg, dry)
+        res["copied"], res["missing"] = do_copy(use_mnt, dest, cfg, dry,
+                                                stop=stop, procs=procs)
 
         if dry or not res["copied"]:
             return res
@@ -534,7 +575,7 @@ def process_card(card, cfg, ts, dry, do_delete, assigned, lock, on_stage=None):
 
         if cfg["after_copy"].get("verify", True):
             stage("verifying")
-            fails = verify(use_mnt, dest, cfg, res["copied"])
+            fails = verify(use_mnt, dest, cfg, res["copied"], stop=stop, procs=procs)
             if fails:
                 res.update(status="verify-failed",
                            error=f"{len(fails)} file(s) did not match; source kept")
@@ -542,10 +583,13 @@ def process_card(card, cfg, ts, dry, do_delete, assigned, lock, on_stage=None):
 
         if do_delete:
             stage("deleting")
-            d = delete_source(card, use_mnt, cfg, dest, res["copied"], owned)
+            d = delete_source(card, use_mnt, cfg, dest, res["copied"], owned,
+                              stop=stop, procs=procs)
             res["deleted"] = d["deleted"]
             if d["error"]:
                 res.update(status="delete-skipped", error=d["error"])
+    except Cancelled:                               # user cancelled mid-copy/verify
+        res.update(status="cancelled", error="cancelled (no source data lost)")
     except Exception as e:                          # noqa: BLE001 - report, never crash the batch
         res.update(status="error", error=str(e))
     finally:

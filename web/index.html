@@ -117,7 +117,7 @@
   <section class="panel">
     <h2>1 &middot; Detected cards</h2>
     <div class="row" style="margin-bottom:10px">
-      <button onclick="detect()">↻ Refresh</button>
+      <button onclick="detect(true)">↻ Refresh</button>
       <span id="detsum" class="hint"></span>
     </div>
     <table>
@@ -224,24 +224,28 @@ function setRole(isRoot){
     '<div class="warnbar">Server is running without root, so it can detect cards but cannot mount/copy them. Restart with <code>sudo python3 webui.py</code> to enable copying.</div>';
 }
 
-async function detect(){
-  $('detsum').textContent = 'scanning…';
-  const d = await jget('/api/detect');
+let lastDetectSig='';
+async function detect(force){
+  if(force===true) $('detsum').textContent = 'scanning…';
+  let d; try { d = await jget('/api/detect'); } catch(e){ return; }
   if(d.is_root!==undefined) setRole(d.is_root);
+  if(d.error){ $('cards').innerHTML=`<tr><td colspan="7" class="stat-bad">${d.error}</td></tr>`; return; }
+  // only re-render when the card set actually changes, so 2s auto-detect doesn't
+  // wipe the user's slot selections or flicker the table
+  const sig = JSON.stringify((d.cards||[]).map(c=>[c.slot,c.label,c.eligible,c.mounted_at,c.size_h]));
+  if(sig===lastDetectSig && force!==true) return;
+  lastDetectSig = sig;
   const tb=$('cards'); tb.innerHTML='';
-  if(d.error){ tb.innerHTML=`<tr><td colspan="7" class="stat-bad">${d.error}</td></tr>`; return; }
-  if(!d.cards.length){ tb.innerHTML='<tr><td colspan="7" class="hint">No USB readers detected. Insert cards and Refresh.</td></tr>'; }
+  if(!d.cards.length) tb.innerHTML='<tr><td colspan="7" class="hint">No USB readers detected. Insert a card.</td></tr>';
   for(const c of d.cards){
-    const tr=document.createElement('tr');
     const chk = c.eligible ? `<input type="checkbox" class="csel" data-slot="${c.slot}" checked onchange="precheck()">` : '';
     const mnt = c.mounted_at ? ` <span class="hint">· mounted at ${c.mounted_at}</span>` : '';
     const status = c.eligible ? `<span class="badge ok">eligible</span>${mnt}`
       : `<span class="badge no">skip</span> <span class="hint">${c.error||''}</span>`;
-    tr.innerHTML = `<td>${chk}</td><td>${c.slot}</td><td class="mono">${c.disk||'-'}</td>
-      <td>${c.fstype||'-'}</td><td>${c.size_h||'-'}</td><td class="mono">${c.label||'-'}</td><td>${status}</td>`;
-    tb.appendChild(tr);
+    tb.innerHTML += `<tr><td>${chk}</td><td>${c.slot}</td><td class="mono">${c.disk||'-'}</td>
+      <td>${c.fstype||'-'}</td><td>${c.size_h||'-'}</td><td class="mono">${c.label||'-'}</td><td>${status}</td></tr>`;
   }
-  $('detsum').textContent = `${d.count} slot(s), ${d.eligible} eligible`;
+  $('detsum').textContent = `${d.count} slot(s), ${d.eligible} eligible · auto-refreshing`;
   precheck();
 }
 
@@ -429,7 +433,13 @@ async function poll(){
   const s = await jget('/api/status');
   lastStatus = s;
   renderProgress(s);
-  if(!s.running && s.finished_at){ clearInterval(polling); polling=null; updateRunButtons(); detect(); }
+  if(!s.running && s.finished_at){ clearInterval(polling); polling=null; updateRunButtons(); detect(true); }
+}
+
+async function cancelJob(){
+  if(!confirm('Stop the copy now? Recordings already copied are kept — nothing is lost (no source files are deleted unless already verified on the destination).')) return;
+  const r = await jpost('/api/cancel', {});
+  if(r.error) showRunMsg(r.error);
 }
 
 let ejectState = {};   // slot -> {ok:bool, msg:string, busy:bool}
@@ -485,16 +495,20 @@ function renderProgress(s){
   const io = s.io||{read_mbps:0,write_mbps:0};
   const ov = s.overall||{};
   const etaPill = (s.running && ov.eta) ? `<span class="speed">ETA ${ov.eta}</span>` : '';
+  const cancelBtn = s.running
+    ? (s.cancelling ? '<button disabled>cancelling…</button>'
+                    : '<button class="danger" onclick="cancelJob()">✕ Cancel copy</button>')
+    : '';
   $('jobhdr').innerHTML = s.started_at
-    ? `<span class="speed">read ${io.read_mbps.toFixed(0)} MB/s</span><span class="speed">write ${io.write_mbps.toFixed(0)} MB/s</span>${etaPill}
-       <span class="hint">${s.mode||''} · ${s.running?'running…':'finished '+(s.finished_at||'')}${s.do_delete?' · delete ON':''}</span>`
+    ? `${cancelBtn}<span class="speed" style="margin-left:8px">read ${io.read_mbps.toFixed(0)} MB/s</span><span class="speed">write ${io.write_mbps.toFixed(0)} MB/s</span>${etaPill}
+       <span class="hint">${s.mode||''} · ${s.running?(s.cancelling?'cancelling…':'running…'):'finished '+(s.finished_at||'')}${s.do_delete?' · delete ON':''}</span>`
     : '<span class="hint">No job yet.</span>';
   const g=$('prog'); g.innerHTML='';
   for(const c of cards){
     const pr=c.progress||{percent:0};
     const done = c.stage==='done';
     const pct = pr.percent||0;
-    const cls = c.status==='ok' ? 'stat-ok' : (c.status==='pending'||!done) ? '' : 'stat-bad';
+    const cls = c.status==='ok' ? 'stat-ok' : c.status==='cancelled' ? 'stat-warn' : (c.status==='pending'||!done) ? '' : 'stat-bad';
     g.innerHTML += `<div class="ccard">
       <div class="top"><span class="cid">slot ${c.slot} · ${c.card_id||''}</span>
         <span class="stage ${c.stage}">${c.stage}</span></div>
@@ -514,7 +528,20 @@ function renderProgress(s){
 }
 
 // boot
-loadConfig().then(detect);
+async function boot(){
+  await loadConfig();
+  await detect(true);
+  // reconnect to a job already running on the server (survives browser close/reopen)
+  try {
+    const s = await jget('/api/status');
+    lastStatus = s;
+    if(s.running){ renderProgress(s); startPolling(); }
+    else if(s.started_at){ renderProgress(s); }   // show the last finished result
+  } catch(e){}
+  // auto-detect cards every 2s while idle (never during a copy; tab must be visible)
+  setInterval(()=>{ if(!polling && !document.hidden) detect(); }, 2000);
+}
+boot();
 </script>
 </body>
 </html>

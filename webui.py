@@ -158,12 +158,20 @@ def ensure_preview(video):
     return None
 
 
+_last_rescan = [0.0]
+
+
 def rescan_usb():
     """Force USB card readers to re-read their media so a newly-inserted card is
     detected WITHOUT opening it in a file manager (these readers don't reliably
-    fire media-change events). Root only; skipped while a job is running."""
+    fire media-change events). Root only; skipped while a job is running; throttled
+    so the page's 2 s auto-detect polling doesn't constantly rescan the readers."""
     if os.geteuid() != 0 or JOB.running:
         return
+    now = time.monotonic()
+    if now - _last_rescan[0] < 4.0:
+        return
+    _last_rescan[0] = now
     try:
         data = json.loads(subprocess.run(["lsblk", "-J", "-o", "NAME,TRAN,TYPE"],
                                           text=True, capture_output=True).stdout)
@@ -229,6 +237,9 @@ class Job:
         self.error = None
         self.io = {"read_mbps": 0.0, "write_mbps": 0.0}
         self.overall = {"eta": "", "rate_mbps": 0.0, "remaining": 0}
+        self.cancel = threading.Event()
+        self.procs = set()                 # live cancellable subprocesses (rsync)
+        self.procs_lock = threading.Lock()
 
     def append_log(self, msg):
         self.log.append(f"{datetime.now().strftime('%H:%M:%S')}  {msg}")
@@ -237,6 +248,7 @@ class Job:
         with self.lock:
             return {
                 "running": self.running,
+                "cancelling": self.cancel.is_set(),
                 "mode": self.mode,
                 "do_delete": self.do_delete,
                 "started_at": self.started_at,
@@ -398,7 +410,10 @@ def run_job(dry, no_delete, slots):
         JOB.log = []
         JOB.io = {"read_mbps": 0.0, "write_mbps": 0.0}
         JOB.overall = {"eta": "", "rate_mbps": 0.0, "remaining": 0}
+        JOB.cancel.clear()
         JOB.cards = {}
+    with JOB.procs_lock:
+        JOB.procs.clear()
         for c in usable:
             tb, tf, sessions = precomp[c["slot"]]
             JOB.cards[c["slot"]] = {
@@ -433,7 +448,9 @@ def run_job(dry, no_delete, slots):
 
     def do_one(card):
         res = opm.process_card(card, cfg, ts, dry, do_delete, assigned, lock,
-                               on_stage=on_stage)
+                               on_stage=on_stage,
+                               stop=lambda: JOB.cancel.is_set(),
+                               procs=(JOB.procs, JOB.procs_lock))
         with JOB.lock:
             cur = JOB.cards.get(res["slot"])
             if cur is not None:
@@ -599,6 +616,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(api_precheck(self._body()))
         if path == "/api/run":
             return self._json(api_run(self._body()))
+        if path == "/api/cancel":
+            return self._json(api_cancel())
         if path == "/api/eject":
             return self._json(api_eject(self._body()))
         return self._json({"error": "not found"}, 404)
@@ -784,6 +803,26 @@ def api_run(body):
                     "precheck": pre}
     threading.Thread(target=run_job, args=(dry, no_delete, slots), daemon=True).start()
     return {"started": True, "dry_run": dry, "no_delete": no_delete}
+
+
+def api_cancel():
+    """Peacefully stop a running job: signal cancel and terminate live rsync procs.
+    Safe — deletion only removes files already verified on the destination, and an
+    interrupted copy leaves complete files intact (in-flight files are rsync temp
+    files that are never renamed into place)."""
+    with JOB.lock:
+        if not JOB.running:
+            return {"error": "no job is running"}
+        JOB.cancel.set()
+        JOB.append_log("Cancellation requested — stopping safely…")
+    with JOB.procs_lock:
+        procs = list(JOB.procs)
+    for p in procs:
+        try:
+            p.terminate()
+        except Exception:                              # noqa: BLE001
+            pass
+    return {"ok": True, "message": "cancelling — stopping after the current file"}
 
 
 def api_eject(body):
