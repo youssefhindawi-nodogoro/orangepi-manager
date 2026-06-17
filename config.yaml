@@ -52,7 +52,11 @@ mount:
   fsck_dirty: true                   # run `e2fsck -p` before the writable delete phase
 
 after_copy:
-  verify: true                       # checksum-verify every copied file before any deletion
+  verify: true                       # checksum-verify every file before deleting it. In the web
+                                     # UI, "Copy (keep source)" skips this (the card stays your
+                                     # backup, so it's faster); "Copy + delete" always verifies
+                                     # first regardless. Set false to fall back to a checksum
+                                     # inside the delete step instead (CLI / advanced).
   delete_source: true                # CLI only: remove verified files from the card. The web
                                      # UI ignores this — deletion there is the red "Copy + delete" button.
   prune_empty_dirs: true             # remove dirs left empty by deletion (within copied trees only)
@@ -62,5 +66,8 @@ copy:
   max_workers: 4
   flatten: true                      # true: copy only the leaf folder (dest/<leaf>/…, e.g. dest/stereo/…)
                                      # false: recreate the full on-card path (dest/home/orangepi/…/stereo/…)
+  skip_empty: true                   # never copy 0-byte files (they hold no data). Applied to
+                                     # copy + verify + delete alike, so an empty file is also
+                                     # never counted, never blocks a delete, and is left on the card.
 
 require_confirm: true                # prompt y/N once before the delete phase

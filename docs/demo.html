@@ -162,11 +162,10 @@
     <h2>4 &middot; Run</h2>
     <div id="runmsg"></div>
     <div class="row">
-      <button id="b_dry" onclick="run({dry_run:true})">🔍 Dry-run (preview only)</button>
       <button id="b_copy" class="primary" onclick="run({no_delete:true})">⬇ Copy (keep source)</button>
       <button id="b_del" class="danger" onclick="runDelete()">⬇✕ Copy + delete source</button>
     </div>
-    <p class="hint" style="margin:10px 0 0">Copy buttons stay disabled until the plan confirms the data fits the destination. “Copy + delete” only removes files that pass a checksum re-verify.</p>
+    <p class="hint" style="margin:10px 0 0"><b>Copy (keep source)</b> leaves the card untouched (faster — no checksum re-read). <b>Copy + delete source</b> copies, checksum-verifies every file, then removes only what passes. Both stay disabled while a job runs, until the plan fits, and until every selected card is healthy.</p>
   </section>
 
   <!-- VIDEO PREVIEW MODAL -->

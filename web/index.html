@@ -164,11 +164,10 @@
     <h2>4 &middot; Run</h2>
     <div id="runmsg"></div>
     <div class="row">
-      <button id="b_dry" onclick="run({dry_run:true})">🔍 Dry-run (preview only)</button>
       <button id="b_copy" class="primary" onclick="run({no_delete:true})">⬇ Copy (keep source)</button>
       <button id="b_del" class="danger" onclick="runDelete()">⬇✕ Copy + delete source</button>
     </div>
-    <p class="hint" style="margin:10px 0 0">Copy buttons stay disabled until the plan confirms the data fits the destination. “Copy + delete” only removes files that pass a checksum re-verify.</p>
+    <p class="hint" style="margin:10px 0 0"><b>Copy (keep source)</b> copies new recordings and leaves the card untouched (the card stays your backup, so no checksum re-read is needed — it's faster). <b>Copy + delete source</b> copies, then <b>checksum-verifies every file</b>, and only removes files that pass. Both buttons stay disabled while a job runs, until the plan confirms the data fits, and until every selected card's filesystem is healthy.</p>
   </section>
 
   <!-- VIDEO PREVIEW MODAL -->
@@ -209,7 +208,7 @@
 
 <script>
 const $ = id => document.getElementById(id);
-let planFits = false, planPlaceholder = true, jobRunning = false, tickN = 0;
+let planFits = false, planPlaceholder = true, planHealthy = true, jobRunning = false, tickN = 0, submitting = false;
 
 async function jget(u){ const r = await fetch(u); return r.json(); }
 async function jpost(u,b){ const r = await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b||{})}); return r.json(); }
@@ -354,15 +353,23 @@ function fsUse(){ if(fsCur){ $('dest').value = fsCur; closeBrowser(); applyConfi
 function renderPlan(p){
   if(p.error){ $('plan').innerHTML=`<div class="fit bad">${p.error}</div>`; planFits=false; updateRunButtons(); return; }
   planPlaceholder = p.placeholder;
-  planFits = p.fits && p.cards.length>0 && !p.placeholder;
-  // duplicate-check verdict (shown above the plan)
+  const sick = p.unhealthy || [];
+  planHealthy = sick.length === 0;
+  planFits = p.fits && p.cards.length>0 && !p.placeholder && planHealthy;
+  // health verdict first — a corrupt card blocks copying until it's re-seated
   let verdict = '';
-  if(p.cards && p.cards.length && !p.placeholder){
+  if(sick.length){
+    verdict += `<div class="fit bad"><b>⚠ ${sick.length} card(s) need attention before copying:</b><br>`
+      + sick.map(u=>`slot ${u.slot} (${u.card_id}) — ${u.msg}`).join('<br>')
+      + `<br><span class="hint">Unplug the card and plug it back in (or run <code>e2fsck</code>), press <b>↻ Refresh</b>, then <b>Recheck</b>.</span></div>`;
+  }
+  // duplicate-check verdict (shown above the plan)
+  if(p.cards && p.cards.length && !p.placeholder && planHealthy){
     const tn = p.total_new||0, tp = p.total_present||0, tot = tn+tp;
     if(tot && tn===0)
-      verdict = `<div class="fit ok"><b>✓ Nothing new to copy</b> — all ${tot} recording(s) are already in the destination.</div>`;
+      verdict += `<div class="fit ok"><b>✓ Nothing new to copy</b> — all ${tot} recording(s) are already in the destination.</div>`;
     else if(tot)
-      verdict = `<div class="fit warn"><b>⬆ ${tn} new recording(s) to copy</b> (${fmtBytes(p.need)})${tp?` · ${tp} already in the destination (skipped)`:''}.</div>`;
+      verdict += `<div class="fit warn"><b>⬆ ${tn} new recording(s) to copy</b> (${fmtBytes(p.need)})${tp?` · ${tp} already in the destination (skipped)`:''}.</div>`;
   }
   if($('dupverdict')) $('dupverdict').innerHTML = verdict;
   let html='';
@@ -386,13 +393,16 @@ function renderPlan(p){
   }
   let cards='';
   for(const c of p.cards){
+    const body = (c.healthy === false)
+      ? `<div class="fit bad" style="margin:6px 0 0">⚠ ${c.health_msg||'filesystem needs cleaning'} — re-seat this card and Recheck.</div>`
+      : `<div>to copy: <b>${fmtBytes(c.new_bytes)}</b> new${c.present_count?` · <span class="stat-ok">${c.present_count} already there</span>`:''} · ${(c.sessions||[]).length} recordings</div>
+      <div class="hint">Orange Pi card free: ${fmtBytes(c.src_free)} of ${fmtBytes(c.src_total)}</div>
+      ${sessionsHtml(c.sessions, c.slot)}`;
     cards += `<div class="ccard">
       <div class="top"><span class="cid">slot ${c.slot} · ${c.card_id}</span>
         <span class="hint mono">${c.disk}</span></div>
       <div class="hint mono" title="destination folder for this card">→ ${c.card_id}/</div>
-      <div>to copy: <b>${fmtBytes(c.new_bytes)}</b> new${c.present_count?` · <span class="stat-ok">${c.present_count} already there</span>`:''} · ${(c.sessions||[]).length} recordings</div>
-      <div class="hint">Orange Pi card free: ${fmtBytes(c.src_free)} of ${fmtBytes(c.src_total)}</div>
-      ${sessionsHtml(c.sessions, c.slot)}
+      ${body}
     </div>`;
   }
   if(cards) html += `<div class="cardgrid" style="margin-top:8px">${cards}</div>`;
@@ -401,8 +411,7 @@ function renderPlan(p){
 }
 
 function updateRunButtons(){
-  $('b_dry').disabled = jobRunning || planPlaceholder;
-  const block = jobRunning || !planFits;
+  const block = jobRunning || submitting || !planFits || !planHealthy;
   $('b_copy').disabled = block;
   $('b_del').disabled = block;
 }
@@ -410,19 +419,26 @@ function updateRunButtons(){
 function showRunMsg(m){ $('runmsg').innerHTML = m ? `<div class="msg err">${m}</div>` : ''; }
 
 async function run(opts){
-  await applyConfig();
-  const slots = selectedSlots();
-  if(!slots.length){ showRunMsg('Select at least one eligible card.'); return; }
-  if(!opts.dry_run && !planFits){ showRunMsg('Not enough space at the destination — see Plan & space.'); return; }
-  const r = await jpost('/api/run', Object.assign({slots}, opts));
-  if(r.error){ showRunMsg(r.error); return; }
-  ejectState = {}; showRunMsg(''); tick();   // pick up the new job immediately
+  if(submitting || jobRunning) return;                     // guard against double-submit
+  submitting = true; updateRunButtons();
+  try{
+    await applyConfig();
+    const slots = selectedSlots();
+    if(!slots.length){ showRunMsg('Select at least one eligible card.'); return; }
+    if(!planFits){ showRunMsg('Not enough space at the destination — see Plan & space.'); return; }
+    if(!planHealthy){ showRunMsg('A selected card’s filesystem needs cleaning — re-seat it and Recheck first.'); return; }
+    const r = await jpost('/api/run', Object.assign({slots}, opts));
+    if(r.error){ showRunMsg(r.error); return; }
+    ejectState = {}; showRunMsg(''); jobRunning = true; tick();   // reflect the new job immediately
+  } catch(e){ showRunMsg('Could not start: ' + e); }
+  finally{ submitting = false; updateRunButtons(); }
 }
 
 function runDelete(){
+  if(submitting || jobRunning) return;
   const slots = selectedSlots();
   if(!slots.length){ showRunMsg('Select at least one eligible card.'); return; }
-  if(!confirm(`This will DELETE the copied files from ${slots.length} card(s) AFTER a verified copy. Continue?`)) return;
+  if(!confirm(`This will COPY, then CHECKSUM-VERIFY every file, then DELETE the verified files from ${slots.length} card(s). Files that fail verification are kept. Continue?`)) return;
   run({no_delete:false});
 }
 
@@ -432,10 +448,11 @@ function runDelete(){
 async function tick(){
   let s; try { s = await jget('/api/status'); } catch(e){ return; }
   lastStatus = s;
-  const justFinished = jobRunning && !s.running;
-  jobRunning = !!s.running;
-  if(s.running || justFinished || (tickN===0 && s.started_at)) renderProgress(s);
-  if(!s.running){
+  const busy = !!(s.running || s.starting);                 // "starting" = being prepared
+  const justFinished = jobRunning && !busy;
+  jobRunning = busy;
+  if(busy || justFinished || (tickN===0 && s.started_at)) renderProgress(s);
+  if(!busy){
     if(justFinished) detect(true);                          // copy done -> refresh plan/detection
     else if(!document.hidden && tickN % 2 === 0) detect();  // idle: auto-detect ~every 2s
   }
@@ -509,7 +526,8 @@ function renderProgress(s){
   $('jobhdr').innerHTML = s.started_at
     ? `${cancelBtn}<span class="speed" style="margin-left:8px">read ${io.read_mbps.toFixed(0)} MB/s</span><span class="speed">write ${io.write_mbps.toFixed(0)} MB/s</span>${etaPill}
        <span class="hint">${s.mode||''} · ${s.running?(s.cancelling?'cancelling…':'running…'):'finished '+(s.finished_at||'')}${s.do_delete?' · delete ON':''}</span>`
-    : '<span class="hint">No job yet.</span>';
+    : (s.starting ? '<span class="hint">Preparing job — scanning cards…</span>'
+                  : '<span class="hint">No job yet.</span>');
   const g=$('prog'); g.innerHTML='';
   for(const c of cards){
     const pr=c.progress||{percent:0};

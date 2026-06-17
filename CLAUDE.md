@@ -31,9 +31,27 @@ local web UI over one shared engine. Read `README.md` for the user-facing view.
   `rsync -aHAXc --remove-source-files` (re-checksums, re-copies if needed before
   removing). Don't remove a gate. Deletion never removes dirs; `prune_empty_dirs`
   only deletes empty session dirs, never the leaf.
+- **Verify is gated by `process_card(..., verify_copy=)`.** The web UI passes
+  `verify_copy=do_delete`: "Copy (keep source)" skips the expensive checksum
+  re-read (the card is the backup); "Copy + delete" always verifies first.
+  `verify_copy=None` (CLI default) follows `after_copy.verify`. Whatever you
+  change, **a delete must still be preceded by a checksum pass** — either
+  `verify()` here or the `-c` inside `delete_source` when verify is off.
+- **Health-probe a card before copy** (`opm.probe_health`, bounded stat-only
+  walk). A corrupt/dirty ext4 (EUCLEAN "Structure needs cleaning", EIO) is
+  reported by `/api/precheck` (per-card `healthy`/`health_msg` + top-level
+  `unhealthy[]`) and hard-blocked by `/api/run`, so the user re-seats the card
+  instead of failing mid-copy. All card-reading helpers must stay crash-proof
+  (wrap `os.stat`/`getsize`) — one bad inode must never kill a request thread.
 - **`copy.flatten`** must stay consistent across `do_copy`, `verify`,
   `missing_on_dest`, `delete_source` (all via `_rsync_src`) and the sampler
   (`dest_path_for`). If you change copy layout, change all of them.
+- **Empty (0-byte) files are skipped everywhere** (`copy.skip_empty`, via
+  `_size_filter` → `--min-size=1`). It must be applied to the same four rsync
+  stages, or an empty source file would falsely fail `verify`/block
+  `missing_on_dest`. `dir_stats` also excludes 0-byte files so totals and the
+  dedup/presence check match what actually transfers. Empties stay on the card
+  (never copied, never deleted).
 - **Mounting needs root.** `run`/`eject` require euid 0; `detect`/`precheck` don't.
   Output is `chown`ed back to `SUDO_UID`.
 

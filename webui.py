@@ -97,9 +97,15 @@ def session_video(slot, session, fname=None):
         names = sorted(os.listdir(sess))
     except OSError:
         return None
-    vids = [f for f in names
-            if f.lower().endswith(_VID_EXT) and os.path.getsize(os.path.join(sess, f)) > 0]
-    return os.path.join(sess, vids[0]) if vids else None
+    for f in names:                              # first non-empty, readable video
+        if not f.lower().endswith(_VID_EXT):
+            continue
+        try:                                     # a corrupt card raises EUCLEAN here;
+            if os.path.getsize(os.path.join(sess, f)) > 0:   # skip it, never crash the
+                return os.path.join(sess, f)                 # request thread
+        except OSError:
+            continue
+    return None
 
 
 def ensure_thumb(video):
@@ -228,6 +234,7 @@ class Job:
     def __init__(self):
         self.lock = threading.Lock()
         self.running = False
+        self.starting = False      # claimed by api_run before run_job sets `running`
         self.mode = None
         self.do_delete = False
         self.started_at = None
@@ -248,6 +255,7 @@ class Job:
         with self.lock:
             return {
                 "running": self.running,
+                "starting": self.starting,
                 "cancelling": self.cancel.is_set(),
                 "mode": self.mode,
                 "do_delete": self.do_delete,
@@ -369,40 +377,48 @@ def sampler_loop(src_devs, dest_dev, cfg, stop_evt):
                            "remaining": int(tot_remaining)}
 
 
-def run_job(dry, no_delete, slots):
+def run_job(no_delete, slots):
     cfg = CFG
-    cards = detect_ready()
-    usable = [c for c in cards if c.get("eligible")]
-    if slots:
-        usable = [c for c in usable if c["slot"] in slots]
+    try:
+        cards = detect_ready()
+        usable = [c for c in cards if c.get("eligible")]
+        if slots:
+            usable = [c for c in usable if c["slot"] in slots]
+        # pre-scan each card's source: byte/file totals + session date/time/type breakdown
+        precomp = {}
+        for c in usable:
+            mnt = c.get("mounted_at")
+            tb = tf = 0
+            sessions = []
+            for p in cfg["copy_paths"]:
+                full = os.path.join(mnt, p.lstrip("/")) if mnt else ""
+                if full and os.path.isdir(full):
+                    b, f, _ = opm.dir_stats(full)
+                    tb += b
+                    tf += f
+                    for s in opm.list_sessions(full):
+                        s["path"] = p
+                        s["copied"] = 0
+                        s["done"] = False
+                        sessions.append(s)
+            precomp[c["slot"]] = (tb, tf, sessions)
+    except Exception as e:                                # noqa: BLE001 - never get stuck "starting"
+        with JOB.lock:
+            JOB.running = False
+            JOB.starting = False
+            JOB.error = str(e)
+            JOB.append_log(f"!! could not start job: {e}")
+        return
     # Web UI: deletion is driven solely by the red "Copy + delete source" button
     # (which sends no_delete=false after a confirm dialog) — there is no delete toggle.
-    do_delete = not no_delete and not dry
+    do_delete = not no_delete
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
     assigned, lock = set(), threading.Lock()
 
-    # pre-scan each card's source: byte/file totals + session date/time/type breakdown
-    precomp = {}
-    for c in usable:
-        mnt = c.get("mounted_at")
-        tb = tf = 0
-        sessions = []
-        for p in cfg["copy_paths"]:
-            full = os.path.join(mnt, p.lstrip("/")) if mnt else ""
-            if full and os.path.isdir(full):
-                b, f, _ = opm.dir_stats(full)
-                tb += b
-                tf += f
-                for s in opm.list_sessions(full):
-                    s["path"] = p
-                    s["copied"] = 0
-                    s["done"] = False
-                    sessions.append(s)
-        precomp[c["slot"]] = (tb, tf, sessions)
-
     with JOB.lock:
         JOB.running = True
-        JOB.mode = "dry-run" if dry else "live"
+        JOB.starting = False
+        JOB.mode = "copy + delete" if do_delete else "copy"
         JOB.do_delete = do_delete
         JOB.started_at = ts
         JOB.finished_at = None
@@ -447,17 +463,18 @@ def run_job(dry, no_delete, slots):
                 JOB.append_log(f"[slot {slot}] {s}")
 
     def do_one(card):
-        res = opm.process_card(card, cfg, ts, dry, do_delete, assigned, lock,
+        res = opm.process_card(card, cfg, ts, False, do_delete, assigned, lock,
                                on_stage=on_stage,
                                stop=lambda: JOB.cancel.is_set(),
-                               procs=(JOB.procs, JOB.procs_lock))
+                               procs=(JOB.procs, JOB.procs_lock),
+                               verify_copy=do_delete)   # verify only when we will delete
         with JOB.lock:
             cur = JOB.cards.get(res["slot"])
             if cur is not None:
                 cur.update(status=res["status"], card_id=res["card_id"],
                            copied=res["copied"], missing=res["missing"],
                            deleted=res["deleted"], error=res["error"], stage="done")
-                if res["status"] == "ok" and not dry:
+                if res["status"] == "ok":
                     cur["progress"].update(percent=100, sessions_done=cur["dirs_total"],
                                            bytes_done=cur["bytes_total"], eta="")
                     for s in cur["sessions"]:
@@ -486,6 +503,7 @@ def run_job(dry, no_delete, slots):
         stop_evt.set()
         with JOB.lock:
             JOB.running = False
+            JOB.starting = False
             JOB.finished_at = datetime.now().strftime("%Y%m%d-%H%M%S")
             JOB.io = {"read_mbps": 0.0, "write_mbps": 0.0}
             JOB.overall = {"eta": "", "rate_mbps": 0.0, "remaining": 0}
@@ -727,6 +745,17 @@ def api_precheck(body):
         mnt = c.get("mounted_at")
         cid = opm.card_id_for(mnt, CFG, c["slot"]) if mnt else f"slot{c['slot']}"
         dest_card = os.path.join(CFG["destination"], cid)
+        healthy, hmsg = opm.probe_health(mnt, CFG["copy_paths"])
+        if not healthy:
+            # don't walk a corrupt card (it would error / mis-count); flag it so the
+            # plan warns and the run buttons stay disabled until it's re-seated.
+            per.append({"slot": c["slot"], "card_id": cid, "label": c.get("label"),
+                        "disk": c["disk"], "mounted_at": mnt, "dest_card": dest_card,
+                        "bytes": 0, "new_bytes": 0, "files": 0,
+                        "present_count": 0, "new_count": 0, "sessions": [],
+                        "src_free": 0, "src_total": 0,
+                        "healthy": False, "health_msg": hmsg})
+            continue
         cb = cf = newb = present = 0
         sessions = []
         for p in CFG["copy_paths"]:
@@ -753,7 +782,8 @@ def api_precheck(body):
                     "disk": c["disk"], "mounted_at": mnt, "dest_card": dest_card,
                     "bytes": cb, "new_bytes": newb, "files": cf,
                     "present_count": present, "new_count": len(sessions) - present,
-                    "sessions": sessions, "src_free": sfree, "src_total": stotal})
+                    "sessions": sessions, "src_free": sfree, "src_total": stotal,
+                    "healthy": True, "health_msg": None})
     dest_fs = opm._fs_type(CFG["destination"])
     fat32 = dest_fs.lower() in {"vfat", "fat", "fat12", "fat16", "fat32", "msdos"}
     oversize = []
@@ -765,6 +795,8 @@ def api_precheck(body):
                 if full and os.path.isdir(full):
                     for rel, sz in opm.oversized_files(full, 4 * 1024 ** 3):
                         oversize.append({"slot": c["slot"], "file": rel, "bytes": sz})
+    unhealthy = [{"slot": c["slot"], "card_id": c["card_id"], "msg": c["health_msg"]}
+                 for c in per if not c.get("healthy", True)]
     return {"destination": CFG["destination"],
             "dest_free": dest_free, "dest_total": dest_total, "dest_fs": dest_fs,
             "dest_is_fat32": fat32, "fat_oversize": oversize,
@@ -772,6 +804,7 @@ def api_precheck(body):
             "total_present": sum(c["present_count"] for c in per),
             "need": need, "fits": need <= dest_free, "after_free": dest_free - need,
             "tight": need <= dest_free and (dest_free - need) < 5 * (1024 ** 3),
+            "unhealthy": unhealthy, "all_healthy": not unhealthy,
             "cards": per, "is_root": os.geteuid() == 0,
             "placeholder": (not CFG["copy_paths"]
                             or any(opm.PLACEHOLDER in p for p in CFG["copy_paths"]))}
@@ -782,27 +815,42 @@ def api_run(body):
         return {"error": "Server is not root, so it cannot mount cards. "
                          "Restart it with:  sudo python3 webui.py"}
     with JOB.lock:
-        if JOB.running:
+        if JOB.running or JOB.starting:
             return {"error": "A job is already running."}
     if not CFG["copy_paths"] or any(opm.PLACEHOLDER in p for p in CFG["copy_paths"]):
         return {"error": f"Set real copy_paths first (still contains {opm.PLACEHOLDER})."}
     cards = detect_ready()
     if not any(c.get("eligible") for c in cards):
         return {"error": "No eligible Orange Pi cards detected."}
-    dry = bool(body.get("dry_run"))
     no_delete = bool(body.get("no_delete"))
     slots = body.get("slots") or None
     if slots:
         slots = {int(s) for s in slots}
-    if not dry and not body.get("force"):
+    # Always re-check the selected cards right before starting: a card whose
+    # filesystem is dirty/corrupt would otherwise fail (or crash) mid-copy.
+    sel = [c for c in cards
+           if c.get("eligible") and (not slots or c["slot"] in slots)]
+    for c in sel:
+        ok, msg = opm.probe_health(c.get("mounted_at"), CFG["copy_paths"])
+        if not ok:
+            return {"error": f"Slot {c['slot']} ({c.get('label') or c['disk']}): {msg}. "
+                             f"Re-seat the card, press Refresh, then Recheck before copying."}
+    if not body.get("force"):
         pre = api_precheck({"slots": list(slots) if slots else []})
         if not pre["fits"]:
             return {"error": f"Not enough space: need {opm._fmt_size(pre['need'])}, only "
                              f"{opm._fmt_size(pre['dest_free'])} free at {CFG['destination']}. "
                              f"Free space or change the destination.",
                     "precheck": pre}
-    threading.Thread(target=run_job, args=(dry, no_delete, slots), daemon=True).start()
-    return {"started": True, "dry_run": dry, "no_delete": no_delete}
+    # Claim the job slot atomically *before* launching the thread, so a rapid second
+    # click (which arrives before run_job sets JOB.running) can't start a 2nd job.
+    # `starting` (not `running`) so run_job's pre-scan can still browse-mount cards.
+    with JOB.lock:
+        if JOB.running or JOB.starting:
+            return {"error": "A job is already running."}
+        JOB.starting = True
+    threading.Thread(target=run_job, args=(no_delete, slots), daemon=True).start()
+    return {"started": True, "no_delete": no_delete}
 
 
 def api_cancel():

@@ -10,11 +10,13 @@ They focus on the safety-critical paths: copy layout (flatten), checksum verify,
 the pre-delete "is it really on the destination" guard, and that deletion never
 removes a file that isn't safely copied.
 """
+import errno
 import os
 import shutil
 import tempfile
 import threading
 import unittest
+import unittest.mock
 from pathlib import Path
 
 import opm
@@ -234,6 +236,53 @@ class TestDeleteSource(Base):
         self.assertTrue(src_files.issubset(dest_files))
 
 
+class TestSkipEmpty(Base):
+    """0-byte files are never copied, never break verify/the delete guard, never
+    counted, and are left on the card (copy.skip_empty, default on)."""
+
+    def make_with_empty(self):
+        # one real recording + a 0-byte file alongside it in the same session
+        write(self.card / "data/20260615-101912/stereo_000.mp4", b"A" * 5000)
+        write(self.card / "data/20260615-101912/stereo_001.mp4", b"")     # empty!
+
+    def test_dir_stats_excludes_empty(self):
+        self.make_with_empty()
+        b, f, _ = opm.dir_stats(str(self.card / "data"))
+        self.assertEqual(f, 1)                 # the empty file is not counted
+        self.assertEqual(b, 5000)
+
+    def test_copy_skips_empty_file(self):
+        self.make_with_empty()
+        cfg = base_cfg()
+        opm.do_copy(str(self.card), self.dest, cfg, dry=False)
+        self.assertTrue((self.dest / "data/20260615-101912/stereo_000.mp4").exists())
+        self.assertFalse((self.dest / "data/20260615-101912/stereo_001.mp4").exists())
+
+    def test_verify_and_guard_ignore_empty(self):
+        self.make_with_empty()
+        cfg = base_cfg()
+        opm.do_copy(str(self.card), self.dest, cfg, dry=False)
+        # the empty source file is absent on dest, but must NOT count as a mismatch
+        self.assertEqual(opm.verify(str(self.card), self.dest, cfg, ["/data"]), [])
+        # ...nor block the pre-delete "is it really on the destination?" guard
+        self.assertEqual(opm.missing_on_dest(str(self.card), self.dest, cfg, ["/data"]), [])
+
+    def test_delete_keeps_empty_on_card(self):
+        self.make_with_empty()
+        cfg = base_cfg()
+        opm.do_copy(str(self.card), self.dest, cfg, dry=False)
+        res = opm.delete_source({}, str(self.card), cfg, self.dest, ["/data"], owned=False)
+        self.assertTrue(res["deleted"])
+        self.assertFalse((self.card / "data/20260615-101912/stereo_000.mp4").exists())
+        self.assertTrue((self.card / "data/20260615-101912/stereo_001.mp4").exists())  # empty kept
+
+    def test_skip_empty_off_copies_empty(self):
+        self.make_with_empty()
+        cfg = base_cfg(copy={"flatten": True, "skip_empty": False})
+        opm.do_copy(str(self.card), self.dest, cfg, dry=False)
+        self.assertTrue((self.dest / "data/20260615-101912/stereo_001.mp4").exists())
+
+
 class TestIdentify(Base):
     def _id(self, mnt, slot, cfg, assigned, lock):
         return opm.identify({"slot": slot}, str(mnt), cfg, assigned, lock)
@@ -309,6 +358,94 @@ class TestArchiveFlags(Base):
 
     def test_archive_flags_on_unix_tmpdir(self):
         self.assertEqual(opm.archive_flags(self.tmp), ["-aHAX", "--numeric-ids"])
+
+
+class TestProbeHealth(Base):
+    """probe_health flags a corrupt/unreadable card before a copy is attempted."""
+
+    def test_healthy_card_passes(self):
+        self.make_data()
+        ok, msg = opm.probe_health(str(self.card), ["/data"])
+        self.assertTrue(ok)
+        self.assertIsNone(msg)
+
+    def test_unmounted_card_is_unhealthy(self):
+        ok, msg = opm.probe_health(None, ["/data"])
+        self.assertFalse(ok)
+        self.assertIn("not mounted", msg)
+        ok2, _ = opm.probe_health(str(self.tmp / "nope"), ["/data"])
+        self.assertFalse(ok2)
+
+    def test_missing_copy_path_is_not_an_error(self):
+        # card mounts fine but the source dir isn't there: "nothing to copy", not corrupt
+        self.card.mkdir(parents=True, exist_ok=True)
+        ok, msg = opm.probe_health(str(self.card), ["/data"])
+        self.assertTrue(ok)
+        self.assertIsNone(msg)
+
+    def test_euclean_is_reported(self):
+        self.make_data()
+        real_scandir = os.scandir
+        target = str(self.card / "data")
+
+        def fake_scandir(path):
+            if str(path) == target:                       # the corrupt directory inode
+                raise OSError(errno.EUCLEAN, "Structure needs cleaning", str(path))
+            return real_scandir(path)
+
+        with unittest.mock.patch("os.scandir", fake_scandir):
+            ok, msg = opm.probe_health(str(self.card), ["/data"])
+        self.assertFalse(ok)
+        self.assertIn("needs cleaning", msg)
+
+
+class TestVerifyGating(Base):
+    """Web 'keep source' skips verify; 'copy + delete' verifies first. The engine
+    exposes this through process_card's verify_copy flag, with delete still guarded."""
+
+    def _card(self):
+        # an eligible card dict pointing at an already-mounted (existing) directory,
+        # so process_card reuses it (no real mount / root needed)
+        return {"slot": 1, "disk": "/dev/sdX", "rootpart": "/dev/sdX1",
+                "label": "opi_root", "error": None}
+
+    def test_keep_source_skips_verify(self):
+        self.make_data()
+        cfg = base_cfg(destination=str(self.dest),
+                       mount={"base": str(self.tmp / "mnt"), "fsck_dirty": True},
+                       after_copy={"verify": True, "delete_source": False,
+                                   "prune_empty_dirs": True})
+        stages = []
+        # point the "mount" at our synthetic card dir via existing_mount monkeypatch
+        with unittest.mock.patch.object(opm, "existing_mount", return_value=str(self.card)), \
+             unittest.mock.patch.object(opm, "cleanup_mount"):
+            res = opm.process_card(self._card(), cfg, "ts", False, False,
+                                   set(), threading.Lock(),
+                                   on_stage=lambda s, st, i=None: stages.append(st),
+                                   verify_copy=False)
+        self.assertEqual(res["status"], "ok")
+        self.assertNotIn("verifying", stages)
+        self.assertFalse(res["deleted"])
+
+    def test_copy_plus_delete_verifies_then_deletes(self):
+        self.make_data()
+        cfg = base_cfg(destination=str(self.dest),
+                       mount={"base": str(self.tmp / "mnt"), "fsck_dirty": True},
+                       after_copy={"verify": True, "delete_source": True,
+                                   "prune_empty_dirs": True})
+        stages = []
+        with unittest.mock.patch.object(opm, "existing_mount", return_value=str(self.card)), \
+             unittest.mock.patch.object(opm, "cleanup_mount"), \
+             unittest.mock.patch.object(opm, "delete_source",
+                                        return_value={"deleted": True, "error": None}) as ds:
+            res = opm.process_card(self._card(), cfg, "ts", False, True,
+                                   set(), threading.Lock(),
+                                   on_stage=lambda s, st, i=None: stages.append(st),
+                                   verify_copy=True)
+        self.assertEqual(res["status"], "ok")
+        self.assertIn("verifying", stages)
+        self.assertTrue(res["deleted"])
+        ds.assert_called_once()
 
 
 if __name__ == "__main__":

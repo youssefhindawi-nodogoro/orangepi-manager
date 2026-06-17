@@ -29,6 +29,7 @@ Usage:
 """
 
 import argparse
+import errno
 import json
 import os
 import re
@@ -117,6 +118,7 @@ def load_config(path):
     cfg["copy"].setdefault("parallel", True)
     cfg["copy"].setdefault("max_workers", 4)
     cfg["copy"].setdefault("flatten", True)
+    cfg["copy"].setdefault("skip_empty", True)    # never copy/delete 0-byte files
     cfg.setdefault("require_confirm", True)
     cfg.setdefault("safety", {})
     cfg["safety"].setdefault("require_label", None)
@@ -317,6 +319,15 @@ def _excludes(cfg):
     return out
 
 
+def _size_filter(cfg):
+    """rsync flag that skips zero-byte files (they hold no data). Applied UNIFORMLY
+    to copy / verify / missing_on_dest / delete_source so an empty file is never
+    copied, never falsely fails verify (absent on dest), never blocks the pre-delete
+    guard, and is never removed from the card. Toggle with copy.skip_empty (default
+    on)."""
+    return ["--min-size=1"] if cfg.get("copy", {}).get("skip_empty", True) else []
+
+
 # Filesystems that can't store Unix ownership/permissions. Preserving them (-a)
 # there makes rsync fail with rc=23 on chown ("Operation not permitted"), so we
 # copy contents + mtimes only for these destinations.
@@ -355,7 +366,7 @@ def do_copy(mnt, dest, cfg, dry, stop=None, procs=None):
             missing.append(p)
             continue
         src, rflags = _rsync_src(mnt, p, flatten)
-        cmd = ["rsync"] + af + rflags + ["--info=stats1"] + _excludes(cfg)
+        cmd = ["rsync"] + af + rflags + ["--info=stats1"] + _size_filter(cfg) + _excludes(cfg)
         if dry:
             cmd.append("--dry-run")
         cmd += [src, str(dest) + "/"]
@@ -372,7 +383,7 @@ def verify(mnt, dest, cfg, paths, stop=None, procs=None):
     for p in paths:
         src, rflags = _rsync_src(mnt, p, flatten)
         cmd = (["rsync"] + af + ["-c", "-n"] + rflags + ["--out-format=%i %n"]
-               + _excludes(cfg) + [src, str(dest) + "/"])
+               + _size_filter(cfg) + _excludes(cfg) + [src, str(dest) + "/"])
         for line in run(cmd, stop=stop, procs=procs).stdout.splitlines():
             code = line.split(" ", 1)[0]
             if code.startswith((">f", "<f", "cf")):   # a regular file would transfer => mismatch
@@ -391,7 +402,7 @@ def missing_on_dest(mnt, dest, cfg, paths, stop=None, procs=None):
     for p in paths:
         src, rflags = _rsync_src(mnt, p, flatten)
         cmd = (["rsync"] + af + ["-n", "--out-format=%i %n"] + rflags
-               + _excludes(cfg) + [src, str(dest) + "/"])
+               + _size_filter(cfg) + _excludes(cfg) + [src, str(dest) + "/"])
         for line in run(cmd, stop=stop, procs=procs).stdout.splitlines():
             parts = line.split(" ", 1)
             if parts[0].startswith((">f", "<f", "cf")):
@@ -430,7 +441,7 @@ def delete_source(card, mnt, cfg, dest, paths, owned=True, stop=None, procs=None
     for p in paths:
         src, rflags = _rsync_src(mnt, p, flatten)
         cmd = (["rsync"] + af + csum + ["--remove-source-files"] + rflags
-               + _excludes(cfg) + [src, str(dest) + "/"])
+               + _size_filter(cfg) + _excludes(cfg) + [src, str(dest) + "/"])
         run(cmd, stop=stop, procs=procs)
         if cfg["after_copy"].get("prune_empty_dirs", True):
             target = Path(mnt) / p.lstrip("/")
@@ -453,7 +464,10 @@ def chown_back(path):
 # --------------------------------------------------------------------------- #
 def dir_stats(path):
     """(total_bytes, file_count, dir_count) under `path`; zeros if missing.
-    Stat-only (no reads), so it's fast even for many GB."""
+    Empty (0-byte) files are NOT counted: opm never copies them (rsync --min-size=1
+    / copy.skip_empty), so excluding them keeps the byte/file totals and the
+    'already copied?' presence check consistent with what actually lands on the
+    destination. Stat-only (no reads), so it's fast even for many GB."""
     tb = fc = dc = 0
     if not os.path.exists(path):
         return (0, 0, 0)
@@ -461,10 +475,12 @@ def dir_stats(path):
         dc += len(dirs)
         for f in files:
             try:
-                tb += os.lstat(os.path.join(root, f)).st_size
-                fc += 1
+                sz = os.lstat(os.path.join(root, f)).st_size
             except OSError:
-                pass
+                continue
+            if sz > 0:                 # skip empties — they're never transferred
+                tb += sz
+                fc += 1
     return (tb, fc, dc)
 
 
@@ -491,9 +507,14 @@ def list_sessions(path):
         types = {}
         try:
             for f in os.listdir(full):
-                if os.path.isfile(os.path.join(full, f)):
-                    stem = re.sub(r"(_\d+)?\.[^.]+$", "", f)   # stereo_000.mp4 -> stereo
-                    types[stem] = types.get(stem, 0) + 1
+                fp = os.path.join(full, f)
+                try:                                           # skip empties + bad inodes,
+                    if not (os.path.isfile(fp) and os.path.getsize(fp) > 0):
+                        continue                               # so types match copied files
+                except OSError:
+                    continue
+                stem = re.sub(r"(_\d+)?\.[^.]+$", "", f)       # stereo_000.mp4 -> stereo
+                types[stem] = types.get(stem, 0) + 1
         except OSError:
             pass
         out.append({"name": name, "date": date, "time": tm,
@@ -530,12 +551,70 @@ def disk_free(path):
     return (st.f_bavail * st.f_frsize, st.f_blocks * st.f_frsize)
 
 
+# Errno values that mean "this card's filesystem is damaged / can't be read",
+# as opposed to a transient or permission problem. EUCLEAN is ext4's
+# "Structure needs cleaning" (a dirty/corrupt fs that wants e2fsck).
+_FS_DAMAGED = {errno.EUCLEAN, errno.EIO, errno.EROFS}
+
+
+def _health_msg(e):
+    base = getattr(e, "strerror", None) or str(e)
+    if getattr(e, "errno", None) == errno.EUCLEAN:
+        return (f"filesystem needs cleaning ({base}) — unplug and replug the card "
+                f"(or run e2fsck), then re-check")
+    return (f"card read error ({base}) — unplug and replug the card, then re-check")
+
+
+def probe_health(mnt, paths, max_checks=4000):
+    """Bounded, early-exiting read probe of a mounted card. Returns (ok, message):
+    detects an ext4 filesystem that is corrupt / 'Structure needs cleaning'
+    (EUCLEAN) or throwing I/O errors (EIO) BEFORE a copy starts, so the UI can tell
+    the user to re-seat the card / run fsck instead of failing mid-copy or crashing
+    a preview. Stat-only (no file reads) and capped at `max_checks` inode stats, so
+    it's cheap on a healthy card and returns on the first bad inode on a sick one."""
+    if not mnt or not os.path.isdir(mnt):
+        return (False, "card is not mounted")
+    try:
+        os.statvfs(mnt)
+    except OSError as e:
+        return (False, _health_msg(e))
+    checks = 0
+    for p in paths:
+        full = os.path.join(mnt, p.lstrip("/"))
+        try:
+            if not os.path.isdir(full):
+                continue
+            stack = [full]
+            while stack and checks < max_checks:
+                with os.scandir(stack.pop()) as it:
+                    for de in it:
+                        checks += 1
+                        if checks >= max_checks:
+                            break
+                        if de.is_dir(follow_symlinks=False):
+                            stack.append(de.path)
+                        else:
+                            de.stat()           # surfaces EUCLEAN on a corrupt inode
+        except OSError as e:
+            if getattr(e, "errno", None) in _FS_DAMAGED:
+                return (False, _health_msg(e))
+            # permission / transient errors are not a reason to block a copy
+    return (True, None)
+
+
 # --------------------------------------------------------------------------- #
 # per-card driver
 # --------------------------------------------------------------------------- #
 def process_card(card, cfg, ts, dry, do_delete, assigned, lock, on_stage=None,
-                 stop=None, procs=None):
+                 stop=None, procs=None, verify_copy=None):
     slot = card["slot"]
+
+    # Whether to checksum-verify the copy. `None` => follow config (CLI default).
+    # The web UI passes verify_copy=do_delete: a "keep source" copy skips the
+    # expensive full re-read (the card is the backup), while "copy + delete"
+    # always verifies every file before anything is removed.
+    if verify_copy is None:
+        verify_copy = cfg["after_copy"].get("verify", True)
 
     def stage(s, info=None):
         if on_stage:
@@ -578,7 +657,7 @@ def process_card(card, cfg, ts, dry, do_delete, assigned, lock, on_stage=None,
             return res
         chown_back(Path(cfg["destination"]) / res["card_id"])
 
-        if cfg["after_copy"].get("verify", True):
+        if verify_copy:
             stage("verifying")
             fails = verify(use_mnt, dest, cfg, res["copied"], stop=stop, procs=procs)
             if fails:

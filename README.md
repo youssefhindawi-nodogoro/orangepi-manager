@@ -78,9 +78,14 @@ can delete, so it must not be network-exposed). Then:
 
 1. **Refresh** detection and tick the slots you want.
 2. Set the **paths to copy** and the **destination**, click *Apply & check space*.
-3. Check the **Plan & disk space** panel is green.
-4. **🔍 Dry-run** (read-only preview) → **⬇ Copy (keep source)** → when happy,
-   **⬇✕ Copy + delete source** (asks to confirm).
+3. **Recheck** — the **Plan & disk space** panel shows what's new vs. already
+   copied, whether it fits, and warns if a card's filesystem **needs cleaning**
+   (re-seat that card before copying). The copy buttons stay disabled until it's
+   green and healthy, and while a job is running.
+4. **⬇ Copy (keep source)** leaves the card untouched (fast — no checksum re-read,
+   the card stays your backup). **⬇✕ Copy + delete source** copies, then
+   **checksum-verifies every file**, and deletes only what passes (asks to confirm).
+   You can **✕ Cancel** at any time without losing data.
 5. When a card shows **✓ Done**, click **⏏ Safe remove** and pull it.
 
 ### CLI
@@ -107,7 +112,7 @@ sudo python3 opm.py run            # copy + verify + delete (prompts y/N first)
 | `safety.min_size_gb` | ignore devices smaller than this (filters empty reader slots) |
 | `identify.mode` | per-card folder naming: `both` / `content` / `slot` |
 | `identify.marker_file` | optional file on the Pi for a custom card id |
-| `after_copy.verify` | checksum-verify every copied file before any deletion |
+| `after_copy.verify` | checksum-verify each file before deleting it (web "Copy + delete" always verifies; "Copy (keep source)" skips it) |
 | `after_copy.delete_source` | remove verified files from the card |
 | `after_copy.prune_empty_dirs` | remove dirs left empty by deletion (never the leaf) |
 | `mount.fsck_dirty` | run `e2fsck -p` before the writable delete phase |
